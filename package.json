@@ -1,0 +1,35 @@
+{
+  "name": "karto-backend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "dev": "nodemon src/server.js",
+    "start": "node src/server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "devDependencies": {
+    "dotenv": "^17.4.2",
+    "nodemon": "^3.1.14",
+    "prisma": "^7.8.0"
+  },
+  "dependencies": {
+    "@prisma/adapter-pg": "^7.8.0",
+    "@prisma/client": "^7.8.0",
+    "bcryptjs": "^3.0.3",
+    "cors": "^2.8.6",
+    "crypto": "^1.0.1",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3",
+    "multer": "^2.1.1",
+    "nodemailer": "^8.0.7",
+    "pg": "^8.20.0",
+    "razorpay": "^2.9.6",
+    "react": "^19.2.6",
+    "socket.io": "^4.8.3",
+    "twilio": "^6.0.2"
+  }
+}

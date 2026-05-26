@@ -1,0 +1,642 @@
+// =========================================================
+// Karto Full Multivendor Food Delivery Schema
+// For Custom Node.js Backend + Prisma + PostgreSQL / Neon
+// Converted from Supabase-style schema to normal PostgreSQL
+//
+// Includes:
+// - customer, vendor, rider, admin roles
+// - users/auth table handled by our own backend
+// - categories
+// - restaurants/vendors
+// - menu items
+// - user addresses
+// - cart items
+// - orders
+// - order items
+// - order status history
+// - rider locations
+// - restaurant ratings
+// - user favorites
+// - discounts
+//
+// Important:
+// - Do NOT store plain password.
+// - Always hash password using bcrypt before saving.
+// - RLS/auth.uid()/auth.users are removed because this is custom backend.
+// - Authorization will be handled in Node.js middleware using JWT.
+// =========================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// =========================================================
+// ENUMS
+// =========================================================
+
+enum Role {
+  CUSTOMER
+  VENDOR
+  RIDER
+  ADMIN
+}
+
+enum OrderStatus {
+  PLACED
+  ACCEPTED_BY_VENDOR
+  PREPARING
+  READY_FOR_PICKUP
+  ASSIGNED_TO_RIDER
+  PICKED_UP
+  OUT_FOR_DELIVERY
+  DELIVERED
+  CANCELLED
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+}
+
+enum PaymentMethod {
+  COD
+  ONLINE
+  UPI
+  CARD
+  WALLET
+}
+
+// =========================================================
+// 1. USERS
+// Replaces Supabase auth.users + profiles table.
+// Public signup users stay CUSTOMER by default.
+// Vendor, rider, admin will be assigned manually/admin backend.
+// =========================================================
+
+model User {
+  id           String  @id @default(uuid())
+  fullName     String?
+  email        String  @unique
+  phone        String? @unique
+  password     String?
+  avatarUrl    String?
+  role         Role    @default(CUSTOMER)
+  isActive     Boolean @default(true)
+  refreshToken String? // <-- Add this for refresh token
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  addresses   UserAddress[]
+  cartItems   CartItem[]
+  cityId      String?
+  address     String?
+  vehicleNo   String?
+  vehicleType String?
+
+  city City? @relation(fields: [cityId], references: [id], onDelete: SetNull)
+
+  customerOrders Order[]            @relation("CustomerOrders")
+  vendorOrders   Order[]            @relation("VendorOrders")
+  riderOrders    Order[]            @relation("RiderOrders")
+  riderWallet    RiderWallet?
+  riderEarnings  RiderEarning[]
+  riderCoupons   RiderCoupon[]
+  restaurants    Restaurant[]
+  ratings        RestaurantRating[]
+  favorites      UserFavorite[]
+  riderLocations RiderLocation[]
+
+  changedOrderStatuses OrderStatusHistory[] @relation("ChangedByUser")
+
+  @@index([role])
+  @@index([email])
+  @@index([phone])
+  @@index([cityId])
+}
+
+// Otp 
+model Otp {
+  id        String   @id @default(uuid())
+  email     String?
+  phone     String?
+  code      String
+  expiresAt DateTime
+  verified  Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([email])
+  @@index([phone])
+  @@index([code])
+}
+
+model RiderWallet {
+  id        String   @id @default(uuid())
+  riderId   String   @unique
+  balance   Decimal  @default(0) @db.Decimal(10, 2)
+  todayEarn Decimal  @default(0) @db.Decimal(10, 2)
+  totalEarn Decimal  @default(0) @db.Decimal(10, 2)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  rider User @relation(fields: [riderId], references: [id], onDelete: Cascade)
+}
+
+model RiderEarning {
+  id        String   @id @default(uuid())
+  riderId   String
+  orderId   String
+  amount    Decimal  @db.Decimal(10, 2)
+  note      String?
+  createdAt DateTime @default(now())
+
+  rider User  @relation(fields: [riderId], references: [id], onDelete: Cascade)
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([riderId])
+  @@index([orderId])
+  @@index([createdAt])
+}
+
+model RiderCoupon {
+  id        String   @id @default(uuid())
+  riderId   String
+  orderId   String
+  code      String   @unique
+  title     String
+  amount    Decimal  @db.Decimal(10, 2)
+  message   String
+  createdAt DateTime @default(now())
+
+  rider User  @relation(fields: [riderId], references: [id], onDelete: Cascade)
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([riderId])
+  @@index([orderId])
+}
+
+//===================
+// =========================================================
+// 2. CATEGORIES
+// =========================================================
+
+model Category {
+  id          String  @id @default(uuid())
+  name        String  @db.VarChar(60)
+  description String? @db.VarChar(200)
+  imageUrl    String? @db.VarChar(550)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  restaurants   Restaurant[]
+  menuItems     MenuItem[]
+  subCategories ProductSubCategory[]
+
+  @@index([name])
+}
+
+// =========================================================
+// 3. RESTAURANTS / VENDORS
+// vendorId tells which vendor owns/manages this restaurant.
+// =========================================================
+
+model Restaurant {
+  id String @id @default(uuid())
+
+  vendorId   String?
+  cityId     String? // ✅ add
+  categoryId String?
+
+  name          String  @db.VarChar(255)
+  ownerName     String? @db.VarChar(255) // ✅ add
+  ownerMobileNo String? @db.VarChar(20) // ✅ add
+
+  address  String  @db.VarChar(255)
+  phone    String  @db.VarChar(255)
+  email    String  @unique @db.VarChar(255)
+  imageUrl String? @db.VarChar(550)
+
+  type       String? @db.VarChar(80) // restaurant, grocery, medicine
+  commission Decimal @default(0) @db.Decimal(5, 2) // percent
+
+  rating       Decimal @default(0) @db.Decimal(3, 2)
+  totalReviews Int     @default(0)
+  deliveryFee  Decimal @default(5) @db.Decimal(10, 2)
+  minimumOrder Decimal @default(0) @db.Decimal(10, 2)
+  deliveryTime String  @default("30-45 mins") @db.VarChar(50)
+
+  isOpen     Boolean @default(true)
+  isFeatured Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  vendor   User?     @relation(fields: [vendorId], references: [id], onDelete: SetNull)
+  city     City?     @relation(fields: [cityId], references: [id], onDelete: SetNull)
+  category Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+
+  menuItems  MenuItem[]
+  cartItems  CartItem[]
+  orders     Order[]
+  orderItems OrderItem[]
+  ratings    RestaurantRating[]
+  favorites  UserFavorite[]
+
+  @@index([vendorId])
+  @@index([cityId])
+  @@index([categoryId])
+  @@index([isFeatured])
+  @@index([isOpen])
+  @@index([rating])
+}
+
+// =========================================================
+// 4. MENU ITEMS
+// =========================================================
+
+model MenuItem {
+  id           String @id @default(uuid())
+  restaurantId String
+
+  name        String  @db.VarChar(255)
+  description String?
+  price       Decimal @db.Decimal(10, 2)
+  imageUrl    String? @db.VarChar(550)
+
+  isVegetarian Boolean @default(false)
+  isPopular    Boolean @default(false)
+  isAvailable  Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  restaurant    Restaurant          @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  cartItems     CartItem[]
+  orderItems    OrderItem[]
+  categoryId    String?
+  category      Category?           @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  subCategoryId String?
+  subCategory   ProductSubCategory? @relation(fields: [subCategoryId], references: [id], onDelete: SetNull)
+
+  @@index([subCategoryId])
+  @@index([categoryId])
+  @@index([restaurantId])
+  @@index([isPopular])
+  @@index([isAvailable])
+  @@index([isVegetarian])
+}
+
+// =========================================================
+// 5. USER ADDRESSES
+// =========================================================
+
+model UserAddress {
+  id     String @id @default(uuid())
+  userId String
+
+  label    String  @default("Home") @db.VarChar(50)
+  landmark String? @db.VarChar(150)
+
+  address   String
+  country   String   @default("India") @db.VarChar(100)
+  city      String?  @db.VarChar(100)
+  latitude  Decimal? @db.Decimal(10, 7)
+  longitude Decimal? @db.Decimal(10, 7)
+  isDefault Boolean  @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  orders Order[]
+
+  @@index([userId])
+  @@index([city])
+}
+
+// =========================================================
+// 6. CART ITEMS
+// For faster launch: allow one restaurant cart at a time from app logic.
+// =========================================================
+
+model CartItem {
+  id           String @id @default(uuid())
+  userId       String
+  menuItemId   String
+  restaurantId String
+
+  quantity   Int     @default(1)
+  price      Decimal @db.Decimal(10, 2)
+  totalPrice Decimal @db.Decimal(10, 2)
+  note       String?
+
+  createdAt DateTime @default(now())
+
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  menuItem   MenuItem   @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  restaurant Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, menuItemId])
+  @@index([userId])
+  @@index([restaurantId])
+  @@index([menuItemId])
+}
+
+// =========================================================
+// 7. ORDERS
+// Supports customer, vendor, rider flow.
+// orderNumber must be generated in backend before creating order.
+// Example: KT202605160001
+// =========================================================
+
+model Order {
+  id String @id @default(uuid())
+
+  userId       String
+  restaurantId String
+  vendorId     String?
+  riderId      String?
+  addressId    String?
+
+  totalAmount Decimal @db.Decimal(10, 2)
+  deliveryFee Decimal @default(5) @db.Decimal(10, 2)
+
+  paymentMethod PaymentMethod @default(COD)
+  paymentStatus PaymentStatus @default(PENDING)
+  status        OrderStatus   @default(PLACED)
+
+  orderNumber                 String    @unique @db.VarChar(50)
+  customerNote                String?
+  estimatedPreparationMinutes Int?
+  acceptedAt                  DateTime?
+  preparingAt                 DateTime?
+  readyAt                     DateTime?
+  pickedAt                    DateTime?
+  deliveredAt                 DateTime?
+  cancelledAt                 DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user       User         @relation("CustomerOrders", fields: [userId], references: [id])
+  restaurant Restaurant   @relation(fields: [restaurantId], references: [id])
+  vendor     User?        @relation("VendorOrders", fields: [vendorId], references: [id], onDelete: SetNull)
+  rider      User?        @relation("RiderOrders", fields: [riderId], references: [id], onDelete: SetNull)
+  address    UserAddress? @relation(fields: [addressId], references: [id], onDelete: SetNull)
+
+  items          OrderItem[]
+  history        OrderStatusHistory[]
+  riderLocations RiderLocation[]
+  riderEarnings  RiderEarning[]
+  riderCoupons   RiderCoupon[]
+
+  @@index([userId])
+  @@index([restaurantId])
+  @@index([vendorId])
+  @@index([riderId])
+  @@index([status])
+  @@index([paymentStatus])
+  @@index([createdAt])
+}
+
+// =========================================================
+// 8. ORDER ITEMS
+// itemName is stored to keep old name even if menu item changes later.
+// =========================================================
+
+model OrderItem {
+  id           String  @id @default(uuid())
+  orderId      String
+  menuItemId   String?
+  restaurantId String?
+
+  quantity   Int
+  price      Decimal @db.Decimal(10, 2)
+  totalPrice Decimal @db.Decimal(10, 2)
+  itemName   String?
+
+  createdAt DateTime @default(now())
+
+  order      Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  menuItem   MenuItem?   @relation(fields: [menuItemId], references: [id], onDelete: SetNull)
+  restaurant Restaurant? @relation(fields: [restaurantId], references: [id], onDelete: SetNull)
+
+  @@index([orderId])
+  @@index([menuItemId])
+  @@index([restaurantId])
+}
+
+// =========================================================
+// 9. ORDER STATUS HISTORY
+// For tracking timeline in customer/vendor/rider apps.
+// changedBy is optional because system can also change status.
+// =========================================================
+
+model OrderStatusHistory {
+  id        String      @id @default(uuid())
+  orderId   String
+  status    OrderStatus
+  changedBy String?
+  note      String?
+
+  createdAt DateTime @default(now())
+
+  order         Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  changedByUser User? @relation("ChangedByUser", fields: [changedBy], references: [id], onDelete: SetNull)
+
+  @@index([orderId])
+  @@index([changedBy])
+  @@index([status])
+}
+
+// =========================================================
+// 10. RIDER LOCATIONS
+// Optional live tracking. Can be added after basic status tracking.
+// =========================================================
+
+model RiderLocation {
+  id      String @id @default(uuid())
+  riderId String
+  orderId String
+
+  latitude  Decimal @db.Decimal(10, 7)
+  longitude Decimal @db.Decimal(10, 7)
+
+  updatedAt DateTime @updatedAt
+
+  rider User  @relation(fields: [riderId], references: [id], onDelete: Cascade)
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@unique([riderId, orderId])
+  @@index([orderId])
+  @@index([riderId])
+}
+
+// =========================================================
+// 11. RESTAURANT RATINGS
+// Average rating + totalReviews should be updated in backend after insert/update.
+// =========================================================
+
+model RestaurantRating {
+  id           String @id @default(uuid())
+  restaurantId String
+  userId       String
+
+  rating Int
+  review String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  restaurant Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Backend validation required: rating must be between 1 and 5.
+  isActive   Boolean    @default(true)
+
+  @@unique([restaurantId, userId])
+  @@index([isActive])
+  @@index([restaurantId])
+  @@index([userId])
+}
+
+// =========================================================
+// 12. USER FAVORITES
+// =========================================================
+
+model UserFavorite {
+  id           String @id @default(uuid())
+  userId       String
+  restaurantId String
+
+  createdAt DateTime @default(now())
+
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  restaurant Restaurant @relation(fields: [restaurantId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, restaurantId])
+  @@index([userId])
+  @@index([restaurantId])
+}
+
+// =========================================================
+// 13. DISCOUNTS
+// Basic global discount table.
+// Restaurant-specific coupons can be added later.
+// =========================================================
+
+model Discount {
+  id String @id @default(uuid())
+
+  title           String  @db.VarChar(100)
+  description     String?
+  imageUrl        String?
+  discountPercent Int
+
+  validUntil DateTime?
+  isActive   Boolean   @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  // Backend validation required:
+  // discountPercent must be > 0 and <= 100.
+
+  @@index([isActive])
+  @@index([validUntil])
+}
+
+// =========================================================
+// BACKEND LOGIC NOTES
+// =========================================================
+//
+// 1. Register:
+//    - hash password using bcrypt
+//    - create User with role CUSTOMER by default
+//
+// 2. Login:
+//    - find user by email
+//    - compare password using bcrypt.compare
+//    - return JWT token
+//
+// 3. Role assignment:
+//    - admin can update User.role to VENDOR / RIDER / ADMIN
+//
+// 4. Create restaurant:
+//    - vendorId should be a User with role VENDOR
+//
+// 5. Create order:
+//    - app sends userId from JWT
+//    - backend calculates total amount from cart/menu_items
+//    - backend sets vendorId from restaurant.vendorId
+//    - backend generates orderNumber
+//    - backend creates Order + OrderItems + OrderStatusHistory
+//
+// 6. Update order status:
+//    - vendor/rider/admin only
+//    - update status
+//    - create OrderStatusHistory row
+//    - set acceptedAt/preparingAt/readyAt/etc. depending on status
+//
+// 7. Rating:
+//    - customer creates RestaurantRating
+//    - backend recalculates restaurant.rating and restaurant.totalReviews
+//
+// 8. Cart:
+//    - app/backend should allow one restaurant cart at a time for MVP
+//
+// =========================================================
+// COMMANDS
+// =========================================================
+//
+// 1. Format schema:
+//    npx prisma format
+//
+// 2. Create migration:
+//    npx prisma migrate dev --name init_karto_schema
+//
+// 3. Generate Prisma client:
+//    npx prisma generate
+//
+// 4. Open DB UI:
+//    npx prisma studio
+//
+// =========================================================
+
+model City {
+  id       String  @id @default(uuid())
+  name     String  @db.VarChar(100)
+  code     String  @unique @db.VarChar(50)
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  restaurants Restaurant[]
+  users       User[]
+
+  @@index([code])
+  @@index([name])
+}
+
+model ProductSubCategory {
+  id          String  @id @default(uuid())
+  categoryId  String
+  name        String  @db.VarChar(100)
+  description String?
+  imageUrl    String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  category  Category   @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  menuItems MenuItem[]
+
+  @@index([categoryId])
+  @@index([name])
+}
