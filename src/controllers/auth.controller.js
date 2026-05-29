@@ -27,6 +27,8 @@ const mailTransporter = nodemailer.createTransport({
   host: env.SMTP_HOST || process.env.SMTP_HOST,
   port: Number(env.SMTP_PORT || process.env.SMTP_PORT || 587),
   secure: false,
+  family: 4,
+  requireTLS: true,
   auth: {
     user: env.SMTP_USER || process.env.SMTP_USER,
     pass: env.SMTP_PASS || process.env.SMTP_PASS,
@@ -41,7 +43,9 @@ const twilioClient =
         env.TWILIO_AUTH_TOKEN || process.env.TWILIO_AUTH_TOKEN
       )
     : null;
-
+console.log("SMTP_USER:", process.env.SMTP_USER);
+console.log("SMTP_HOST:", process.env.SMTP_HOST);
+console.log("SMTP_PORT:", process.env.SMTP_PORT);
 const sendEmailOtp = async (email, code) => {
   await mailTransporter.sendMail({
     from: `"Karto Security" <${env.SMTP_USER || process.env.SMTP_USER}>`,
