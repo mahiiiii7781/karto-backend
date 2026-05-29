@@ -895,6 +895,28 @@ export const deleteSubCategory = async (req, res) => {
    MENU ITEMS
 ========================= */
 
+/* =========================
+   MENU ITEMS
+========================= */
+
+const parseJsonArray = value => {
+  if (!value) return [];
+
+  if (Array.isArray(value)) return value;
+
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+};
+
+const boolValue = value => {
+  if (typeof value === "boolean") return value;
+  return String(value) === "true";
+};
+
 export const getAdminMenuItems = async (req, res) => {
   try {
     const { restaurantId, categoryId, subCategoryId } = req.query;
@@ -909,6 +931,19 @@ export const getAdminMenuItems = async (req, res) => {
         restaurant: true,
         category: true,
         subCategory: true,
+        addons: true,
+        customizations: true,
+        reviews: {
+          include: {
+            user: {
+              select: {
+                id: true,
+                fullName: true,
+                avatarUrl: true,
+              },
+            },
+          },
+        },
       },
       orderBy: { createdAt: "desc" },
     });
@@ -926,12 +961,24 @@ export const createMenuItem = async (req, res) => {
       restaurantId,
       categoryId,
       subCategoryId,
+
       name,
       description,
       price,
+
       isVegetarian,
+      isVeg,
       isPopular,
       isAvailable = "true",
+      isBestSeller,
+
+      calories,
+      servingInfo,
+      prepTimeMin,
+      spiceLevel,
+
+      addons,
+      customizations,
     } = req.body;
 
     if (!restaurantId || !name?.trim() || price === undefined) {
@@ -941,42 +988,97 @@ export const createMenuItem = async (req, res) => {
       });
     }
 
-    const restaurant = await prisma.restaurant.findUnique({ where: { id: restaurantId } });
+    const restaurant = await prisma.restaurant.findUnique({
+      where: { id: restaurantId },
+    });
+
     if (!restaurant) {
-      return res.status(404).json({ success: false, message: "Vendor not found" });
+      return res.status(404).json({
+        success: false,
+        message: "Vendor not found",
+      });
     }
 
     if (categoryId) {
-      const category = await prisma.category.findUnique({ where: { id: categoryId } });
+      const category = await prisma.category.findUnique({
+        where: { id: categoryId },
+      });
+
       if (!category) {
-        return res.status(404).json({ success: false, message: "Category not found" });
+        return res.status(404).json({
+          success: false,
+          message: "Category not found",
+        });
       }
     }
 
     if (subCategoryId) {
-      const subCategory = await prisma.productSubCategory.findUnique({ where: { id: subCategoryId } });
+      const subCategory = await prisma.productSubCategory.findUnique({
+        where: { id: subCategoryId },
+      });
+
       if (!subCategory) {
-        return res.status(404).json({ success: false, message: "Subcategory not found" });
+        return res.status(404).json({
+          success: false,
+          message: "Subcategory not found",
+        });
       }
     }
+
+    const finalAddons = parseJsonArray(addons);
+    const finalCustomizations = parseJsonArray(customizations);
 
     const menuItem = await prisma.menuItem.create({
       data: {
         restaurantId,
         categoryId: categoryId || null,
         subCategoryId: subCategoryId || null,
+
         name: name.trim(),
         description: description?.trim() || null,
         price: Number(price),
-        imageUrl: fileUrl(req) || null,
-        isVegetarian: String(isVegetarian) === "true",
-        isPopular: String(isPopular) === "true",
-        isAvailable: String(isAvailable) === "true",
+
+        imageUrl: fileUrl(req) || req.body.imageUrl || null,
+
+        isVegetarian: boolValue(isVegetarian || isVeg),
+        isVeg: boolValue(isVeg || isVegetarian),
+        isPopular: boolValue(isPopular),
+        isBestSeller: boolValue(isBestSeller),
+        isAvailable: String(isAvailable) !== "false",
+
+        calories: calories ? Number(calories) : null,
+        servingInfo: servingInfo?.trim() || null,
+        prepTimeMin: prepTimeMin ? Number(prepTimeMin) : 20,
+        spiceLevel: spiceLevel ? Number(spiceLevel) : 0,
+
+        addons: {
+          create: finalAddons
+            .filter(a => a?.title)
+            .map(a => ({
+              title: String(a.title).trim(),
+              price: Number(a.price || 0),
+              imageUrl: a.imageUrl || null,
+              isActive: a.isActive === undefined ? true : Boolean(a.isActive),
+            })),
+        },
+
+        customizations: {
+          create: finalCustomizations
+            .filter(c => c?.title)
+            .map(c => ({
+              title: String(c.title).trim(),
+              price: Number(c.price || 0),
+              isRequired: Boolean(c.isRequired),
+              isActive: c.isActive === undefined ? true : Boolean(c.isActive),
+            })),
+        },
       },
       include: {
         restaurant: true,
         category: true,
         subCategory: true,
+        addons: true,
+        customizations: true,
       },
     });
 
@@ -997,36 +1099,128 @@ export const updateMenuItem = async (req, res) => {
     const {
       categoryId,
       subCategoryId,
+
       name,
       description,
       price,
+
       isVegetarian,
+      isVeg,
       isPopular,
       isAvailable,
+      isBestSeller,
+
+      calories,
+      servingInfo,
+      prepTimeMin,
+      spiceLevel,
+
+      addons,
+      customizations,
     } = req.body;
 
     const updateData = {
       ...(categoryId !== undefined && { categoryId: categoryId || null }),
       ...(subCategoryId !== undefined && { subCategoryId: subCategoryId || null }),
+
       ...(name !== undefined && { name: name.trim() }),
-      ...(description !== undefined && { description: description?.trim() || null }),
+      ...(description !== undefined && {
+        description: description?.trim() || null,
+      }),
       ...(price !== undefined && { price: Number(price) }),
-      ...(isVegetarian !== undefined && { isVegetarian: String(isVegetarian) === "true" }),
-      ...(isPopular !== undefined && { isPopular: String(isPopular) === "true" }),
-      ...(isAvailable !== undefined && { isAvailable: String(isAvailable) === "true" }),
+
+      ...(isVegetarian !== undefined && {
+        isVegetarian: boolValue(isVegetarian),
+      }),
+      ...(isVeg !== undefined && {
+        isVeg: boolValue(isVeg),
+      }),
+      ...(isPopular !== undefined && {
+        isPopular: boolValue(isPopular),
+      }),
+      ...(isBestSeller !== undefined && {
+        isBestSeller: boolValue(isBestSeller),
+      }),
+      ...(isAvailable !== undefined && {
+        isAvailable: String(isAvailable) !== "false",
+      }),
+
+      ...(calories !== undefined && {
+        calories: calories ? Number(calories) : null,
+      }),
+      ...(servingInfo !== undefined && {
+        servingInfo: servingInfo?.trim() || null,
+      }),
+      ...(prepTimeMin !== undefined && {
+        prepTimeMin: prepTimeMin ? Number(prepTimeMin) : 20,
+      }),
+      ...(spiceLevel !== undefined && {
+        spiceLevel: spiceLevel ? Number(spiceLevel) : 0,
+      }),
     };
 
     const image = fileUrl(req);
     if (image) updateData.imageUrl = image;
 
-    const menuItem = await prisma.menuItem.update({
-      where: { id: req.params.id },
-      data: updateData,
-      include: {
-        restaurant: true,
-        category: true,
-        subCategory: true,
-      },
+    const finalAddons = parseJsonArray(addons);
+    const finalCustomizations = parseJsonArray(customizations);
+
+    const menuItem = await prisma.$transaction(async tx => {
+      const updated = await tx.menuItem.update({
+        where: { id: req.params.id },
+        data: updateData,
+      });
+
+      if (addons !== undefined) {
+        await tx.menuItemAddon.deleteMany({
+          where: { menuItemId: req.params.id },
+        });
+
+        if (finalAddons.length) {
+          await tx.menuItemAddon.createMany({
+            data: finalAddons
+              .filter(a => a?.title)
+              .map(a => ({
+                menuItemId: req.params.id,
+                title: String(a.title).trim(),
+                price: Number(a.price || 0),
+                imageUrl: a.imageUrl || null,
+                isActive: a.isActive === undefined ? true : Boolean(a.isActive),
+              })),
+          });
+        }
+      }
+
+      if (customizations !== undefined) {
+        await tx.menuItemCustomization.deleteMany({
+          where: { menuItemId: req.params.id },
+        });
+
+        if (finalCustomizations.length) {
+          await tx.menuItemCustomization.createMany({
+            data: finalCustomizations
+              .filter(c => c?.title)
+              .map(c => ({
+                menuItemId: req.params.id,
+                title: String(c.title).trim(),
+                price: Number(c.price || 0),
+                isRequired: Boolean(c.isRequired),
+                isActive: c.isActive === undefined ? true : Boolean(c.isActive),
+              })),
+          });
+        }
+      }
+
+      return tx.menuItem.findUnique({
+        where: { id: req.params.id },
+        include: {
+          restaurant: true,
+          category: true,
+          subCategory: true,
+          addons: true,
+          customizations: true,
+        },
+      });
     });
 
     return res.json({
@@ -1044,13 +1238,183 @@ export const updateMenuItem = async (req, res) => {
 export const deleteMenuItem = async (req, res) => {
   try {
     await prisma.menuItem.delete({ where: { id: req.params.id } });
-    return res.json({ success: true, message: "Menu item deleted successfully" });
+
+    return res.json({
+      success: true,
+      message: "Menu item deleted successfully",
+    });
   } catch (error) {
     console.error("Delete Menu Item Error:", error);
     return res.status(500).json({ success: false, message: error.message });
   }
 };
 
+/* =========================
+   MENU ADDONS
+========================= */
+
+export const createMenuItemAddon = async (req, res) => {
+  try {
+    const { menuItemId } = req.params;
+    const { title, price, imageUrl, isActive = true } = req.body;
+
+    if (!title?.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "Addon title is required",
+      });
+    }
+
+    const addon = await prisma.menuItemAddon.create({
+      data: {
+        menuItemId,
+        title: title.trim(),
+        price: Number(price || 0),
+        imageUrl: fileUrl(req) || imageUrl || null,
+        isActive: Boolean(isActive),
+      },
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: "Addon created successfully",
+      addon,
+      data: addon,
+    });
+  } catch (error) {
+    console.error("Create Addon Error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const updateMenuItemAddon = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { title, price, imageUrl, isActive } = req.body;
+
+    const updateData = {
+      ...(title !== undefined && { title: title.trim() }),
+      ...(price !== undefined && { price: Number(price || 0) }),
+      ...(imageUrl !== undefined && { imageUrl: imageUrl || null }),
+      ...(isActive !== undefined && { isActive: Boolean(isActive) }),
+    };
+
+    const image = fileUrl(req);
+    if (image) updateData.imageUrl = image;
+
+    const addon = await prisma.menuItemAddon.update({
+      where: { id },
+      data: updateData,
+    });
+
+    return res.json({
+      success: true,
+      message: "Addon updated successfully",
+      addon,
+      data: addon,
+    });
+  } catch (error) {
+    console.error("Update Addon Error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const deleteMenuItemAddon = async (req, res) => {
+  try {
+    await prisma.menuItemAddon.delete({
+      where: { id: req.params.id },
+    });
+
+    return res.json({
+      success: true,
+      message: "Addon deleted successfully",
+    });
+  } catch (error) {
+    console.error("Delete Addon Error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/* =========================
+   MENU CUSTOMIZATIONS
+========================= */
+
+export const createMenuItemCustomization = async (req, res) => {
+  try {
+    const { menuItemId } = req.params;
+    const { title, price, isRequired = false, isActive = true } = req.body;
+
+    if (!title?.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "Customization title is required",
+      });
+    }
+
+    const customization = await prisma.menuItemCustomization.create({
+      data: {
+        menuItemId,
+        title: title.trim(),
+        price: Number(price || 0),
+        isRequired: Boolean(isRequired),
+        isActive: Boolean(isActive),
+      },
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: "Customization created successfully",
+      customization,
+      data: customization,
+    });
+  } catch (error) {
+    console.error("Create Customization Error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const updateMenuItemCustomization = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { title, price, isRequired, isActive } = req.body;
+
+    const customization = await prisma.menuItemCustomization.update({
+      where: { id },
+      data: {
+        ...(title !== undefined && { title: title.trim() }),
+        ...(price !== undefined && { price: Number(price || 0) }),
+        ...(isRequired !== undefined && { isRequired: Boolean(isRequired) }),
+        ...(isActive !== undefined && { isActive: Boolean(isActive) }),
+      },
+    });
+
+    return res.json({
+      success: true,
+      message: "Customization updated successfully",
+      customization,
+      data: customization,
+    });
+  } catch (error) {
+    console.error("Update Customization Error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const deleteMenuItemCustomization = async (req, res) => {
+  try {
+    await prisma.menuItemCustomization.delete({
+      where: { id: req.params.id },
+    });
+
+    return res.json({
+      success: true,
+      message: "Customization deleted successfully",
+    });
+  } catch (error) {
+    console.error("Delete Customization Error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
 
 /* =========================
    ORDERS

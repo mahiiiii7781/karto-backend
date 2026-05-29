@@ -10,6 +10,7 @@ import {
   updateVendorOrderStatus,
   updatePreparationTime,
   getVendorPayments,
+  getVendorEarningsGraph,
 } from "../controllers/vendor.controllers.js";
 
 const router = express.Router();
@@ -60,8 +61,15 @@ router.get(
   getVendorPayments
 );
 
+router.get(
+  "/earnings/graph",
+  protect,
+  allowRoles("VENDOR", "ADMIN"),
+  getVendorEarningsGraph
+);
+
 /* =========================
-   SINGLE VENDOR (LAST ME)
+   SINGLE VENDOR - KEEP LAST
 ========================= */
 
 router.get("/:id", getVendorById);

@@ -36,6 +36,14 @@ import {
   updateMenuItem,
   deleteMenuItem,
 
+  createMenuItemAddon,
+  updateMenuItemAddon,
+  deleteMenuItemAddon,
+
+  createMenuItemCustomization,
+  updateMenuItemCustomization,
+  deleteMenuItemCustomization,
+
   getAdminOrders,
   getAdminOrderById,
   updateOrderStatusByAdmin,
@@ -81,6 +89,43 @@ router.get("/menu-items", getAdminMenuItems);
 router.post("/menu-items", upload.single("image"), createMenuItem);
 router.patch("/menu-items/:id", upload.single("image"), updateMenuItem);
 router.delete("/menu-items/:id", deleteMenuItem);
+
+/* =========================
+   MENU ADDONS
+========================= */
+
+router.post(
+  "/menu-items/:menuItemId/addons",
+  upload.single("image"),
+  createMenuItemAddon
+);
+
+router.patch(
+  "/menu-addons/:id",
+  upload.single("image"),
+  updateMenuItemAddon
+);
+
+router.delete("/menu-addons/:id", deleteMenuItemAddon);
+
+/* =========================
+   MENU CUSTOMIZATIONS
+========================= */
+
+router.post(
+  "/menu-items/:menuItemId/customizations",
+  createMenuItemCustomization
+);
+
+router.patch(
+  "/menu-customizations/:id",
+  updateMenuItemCustomization
+);
+
+router.delete(
+  "/menu-customizations/:id",
+  deleteMenuItemCustomization
+);
 
 router.get("/orders", getAdminOrders);
 router.get("/orders/:id", getAdminOrderById);

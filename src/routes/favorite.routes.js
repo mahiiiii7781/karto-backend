@@ -4,8 +4,12 @@ import { protect } from "../middleware/auth.middleware.js";
 
 const router = express.Router();
 
-// ✅ Toggle favorite add/remove
-router.post("/:restaurantId", protect, async (req, res) => {
+/* =========================
+   RESTAURANT FAVORITES
+========================= */
+
+// Toggle restaurant favorite
+router.post("/restaurant/:restaurantId", protect, async (req, res) => {
   try {
     const { restaurantId } = req.params;
 
@@ -51,51 +55,23 @@ router.post("/:restaurantId", protect, async (req, res) => {
       },
     });
 
-    res.json({
+    return res.json({
       success: true,
       message: "Added to favorites",
       isFavorite: true,
       data: favorite,
     });
   } catch (error) {
-    console.error("Favorite Toggle Error:", error);
-    res.status(500).json({
+    console.error("Restaurant Favorite Toggle Error:", error);
+    return res.status(500).json({
       success: false,
       message: error.message || "Something went wrong",
     });
   }
 });
 
-// ✅ Get user favorites
-router.get("/", protect, async (req, res) => {
-  try {
-    const favorites = await prisma.userFavorite.findMany({
-      where: {
-        userId: req.user.id,
-      },
-      include: {
-        restaurant: true,
-      },
-      orderBy: {
-        createdAt: "desc",
-      },
-    });
-
-    res.json({
-      success: true,
-      data: favorites,
-    });
-  } catch (error) {
-    console.error("Get Favorites Error:", error);
-    res.status(500).json({
-      success: false,
-      message: error.message || "Something went wrong",
-    });
-  }
-});
-
-// ✅ Check single restaurant favorite status
-router.get("/:restaurantId/status", protect, async (req, res) => {
+// Restaurant favorite status
+router.get("/restaurant/:restaurantId/status", protect, async (req, res) => {
   try {
     const { restaurantId } = req.params;
 
@@ -108,13 +84,156 @@ router.get("/:restaurantId/status", protect, async (req, res) => {
       },
     });
 
-    res.json({
+    return res.json({
       success: true,
       isFavorite: !!favorite,
     });
   } catch (error) {
-    console.error("Favorite Status Error:", error);
-    res.status(500).json({
+    console.error("Restaurant Favorite Status Error:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Something went wrong",
+    });
+  }
+});
+
+/* =========================
+   ITEM FAVORITES
+========================= */
+
+// Toggle item favorite
+router.post("/item/:menuItemId", protect, async (req, res) => {
+  try {
+    const { menuItemId } = req.params;
+
+    const menuItem = await prisma.menuItem.findUnique({
+      where: { id: menuItemId },
+    });
+
+    if (!menuItem) {
+      return res.status(404).json({
+        success: false,
+        message: "Menu item not found",
+      });
+    }
+
+    const existing = await prisma.userFavoriteItem.findUnique({
+      where: {
+        userId_menuItemId: {
+          userId: req.user.id,
+          menuItemId,
+        },
+      },
+    });
+
+    if (existing) {
+      await prisma.userFavoriteItem.delete({
+        where: { id: existing.id },
+      });
+
+      return res.json({
+        success: true,
+        message: "Removed item from favorites",
+        isFavorite: false,
+      });
+    }
+
+    const favorite = await prisma.userFavoriteItem.create({
+      data: {
+        userId: req.user.id,
+        menuItemId,
+      },
+      include: {
+        menuItem: {
+          include: {
+            restaurant: true,
+          },
+        },
+      },
+    });
+
+    return res.json({
+      success: true,
+      message: "Added item to favorites",
+      isFavorite: true,
+      data: favorite,
+    });
+  } catch (error) {
+    console.error("Item Favorite Toggle Error:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Something went wrong",
+    });
+  }
+});
+
+// Item favorite status
+router.get("/item/:menuItemId/status", protect, async (req, res) => {
+  try {
+    const { menuItemId } = req.params;
+
+    const favorite = await prisma.userFavoriteItem.findUnique({
+      where: {
+        userId_menuItemId: {
+          userId: req.user.id,
+          menuItemId,
+        },
+      },
+    });
+
+    return res.json({
+      success: true,
+      isFavorite: !!favorite,
+    });
+  } catch (error) {
+    console.error("Item Favorite Status Error:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Something went wrong",
+    });
+  }
+});
+
+/* =========================
+   GET ALL FAVORITES
+========================= */
+
+router.get("/", protect, async (req, res) => {
+  try {
+    const [restaurants, items] = await Promise.all([
+      prisma.userFavorite.findMany({
+        where: { userId: req.user.id },
+        include: {
+          restaurant: true,
+        },
+        orderBy: { createdAt: "desc" },
+      }),
+
+      prisma.userFavoriteItem.findMany({
+        where: { userId: req.user.id },
+        include: {
+          menuItem: {
+            include: {
+              restaurant: true,
+            },
+          },
+        },
+        orderBy: { createdAt: "desc" },
+      }),
+    ]);
+
+    return res.json({
+      success: true,
+      data: {
+        restaurants,
+        items,
+      },
+      restaurants,
+      items,
+    });
+  } catch (error) {
+    console.error("Get Favorites Error:", error);
+    return res.status(500).json({
       success: false,
       message: error.message || "Something went wrong",
     });

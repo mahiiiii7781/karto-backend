@@ -20,6 +20,10 @@ import favoriteRoutes from "./routes/favorite.routes.js";
 import vendorAnalyticsRoutes from "./routes/vendorAnalytics.routes.js";
 import adminRoutes from "./routes/admin.routes.js";
 import adminVendorRoutes from "./routes/adminVendor.routes.js";
+import reviewRoutes from "./routes/review.routes.js";
+import recentlyViewedRoutes from "./routes/recentlyViewed.routes.js";
+import couponRoutes from "./routes/coupon.routes.js";
+import pushRoutes from "./routes/push.routes.js";
 const app = express();
 
 
@@ -54,7 +58,7 @@ io.on("connection", (socket) => {
   });
 });
 
-// ✅ Test route
+// Test route
 app.get("/", (req, res) => {
   res.json({
     success: true,
@@ -197,10 +201,14 @@ app.use("/api/riders", riderRoutes);
 app.use("/api/vendor-dashboard", vendorDashboardRoutes);
 app.use("/api/address", addressRoutes);
 app.use("/api/favorite", favoriteRoutes);
+app.use("/api/reviews", reviewRoutes);
 app.use("/api/vendor-analytics", vendorAnalyticsRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/admin", adminVendorRoutes);
+app.use("/api/recently-viewed", recentlyViewedRoutes);
 app.use("/uploads", express.static("uploads"));
+app.use("/api/coupons", couponRoutes);
+app.use("/api/push", pushRoutes);
 // 404 handler
 app.use((req, res) => {
   res.status(404).json({
