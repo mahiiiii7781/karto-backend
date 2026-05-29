@@ -49,46 +49,62 @@ console.log("SMTP_USER:", process.env.SMTP_USER);
 console.log("SMTP_HOST:", process.env.SMTP_HOST);
 console.log("SMTP_PORT:", process.env.SMTP_PORT);
 const sendEmailOtp = async (email, code) => {
-  await mailTransporter.sendMail({
-    from: `"Karto Security" <${env.SMTP_USER || process.env.SMTP_USER}>`,
-    to: email,
-    subject: "Your Karto Login OTP",
-    html: `
-      <div style="margin:0;padding:0;background:#050807;font-family:Arial,sans-serif;color:#ffffff;">
-        <div style="max-width:560px;margin:0 auto;padding:28px;">
-          <div style="background:#101510;border:1px solid #2C382E;border-radius:24px;padding:28px;">
-            <div style="font-size:34px;font-weight:900;color:#22C55E;margin-bottom:8px;">
-              Karto
-            </div>
+  try {
+    console.log("BEFORE SMTP VERIFY");
 
-            <h2 style="margin:0;color:#ffffff;font-size:24px;">
-              Verify your login
-            </h2>
+    await mailTransporter.verify();
 
-            <p style="color:#A7B0AA;font-size:15px;line-height:22px;">
-              Use the OTP below to continue securely. This code is valid for
-              <b style="color:#FACC15;">5 minutes</b>.
-            </p>
+    console.log("AFTER SMTP VERIFY");
 
-            <div style="margin:26px 0;padding:20px;border-radius:18px;background:#0B0F0A;border:1px solid #FACC15;text-align:center;">
-              <div style="font-size:38px;letter-spacing:8px;font-weight:900;color:#FACC15;">
-                ${code}
+    const info = await mailTransporter.sendMail({
+      from: `"Karto Security" <${env.SMTP_USER || process.env.SMTP_USER}>`,
+      to: email,
+      subject: "Your Karto Login OTP",
+      html: `
+        <div style="margin:0;padding:0;background:#050807;font-family:Arial,sans-serif;color:#ffffff;">
+          <div style="max-width:560px;margin:0 auto;padding:28px;">
+            <div style="background:#101510;border:1px solid #2C382E;border-radius:24px;padding:28px;">
+              <div style="font-size:34px;font-weight:900;color:#22C55E;margin-bottom:8px;">
+                Karto
               </div>
-            </div>
 
-            <p style="color:#A7B0AA;font-size:13px;line-height:20px;">
-              If you did not request this OTP, you can safely ignore this email.
-              Your Karto account remains protected.
-            </p>
+              <h2 style="margin:0;color:#ffffff;font-size:24px;">
+                Verify your login
+              </h2>
 
-            <div style="margin-top:22px;padding-top:16px;border-top:1px solid #2C382E;color:#22C55E;font-size:13px;">
-              Fast delivery. Secure login. Premium Karto experience.
+              <p style="color:#A7B0AA;font-size:15px;line-height:22px;">
+                Use the OTP below to continue securely. This code is valid for
+                <b style="color:#FACC15;">5 minutes</b>.
+              </p>
+
+              <div style="margin:26px 0;padding:20px;border-radius:18px;background:#0B0F0A;border:1px solid #FACC15;text-align:center;">
+                <div style="font-size:38px;letter-spacing:8px;font-weight:900;color:#FACC15;">
+                  ${code}
+                </div>
+              </div>
+
+              <p style="color:#A7B0AA;font-size:13px;line-height:20px;">
+                If you did not request this OTP, you can safely ignore this email.
+                Your Karto account remains protected.
+              </p>
+
+              <div style="margin-top:22px;padding-top:16px;border-top:1px solid #2C382E;color:#22C55E;font-size:13px;">
+                Fast delivery. Secure login. Premium Karto experience.
+              </div>
             </div>
           </div>
         </div>
-      </div>
-    `,
-  });
+      `,
+    });
+
+    console.log("MAIL SENT SUCCESSFULLY");
+    console.log("MESSAGE ID:", info.messageId);
+
+    return true;
+  } catch (error) {
+    console.error("EMAIL SEND ERROR:", error);
+    throw error;
+  }
 };
 
 export const register = async (req, res) => {
