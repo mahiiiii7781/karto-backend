@@ -8,7 +8,8 @@ import {
 } from "../utils/token.js";
 import nodemailer from "nodemailer";
 import twilio from "twilio";
-
+import dns from "dns";
+dns.setDefaultResultOrder("ipv4first");
 const safeUser = (user) => ({
   id: user.id,
   fullName: user.fullName,
@@ -27,6 +28,7 @@ const mailTransporter = nodemailer.createTransport({
   host: env.SMTP_HOST || process.env.SMTP_HOST || "smtp.gmail.com",
   port: Number(env.SMTP_PORT || process.env.SMTP_PORT || 465),
   secure: true,
+  pool: false,
   family: 4,
   connectionTimeout: 30000,
   greetingTimeout: 30000,
