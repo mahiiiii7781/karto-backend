@@ -209,6 +209,12 @@ app.use((req, res) => {
   });
 });
 
-server.listen(env.PORT, "0.0.0.0", () => {
-  console.log(`Server running on http://192.168.29.120:${env.PORT}`);
+const PORT = process.env.PORT || 5000;
+
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`Server running on port ${PORT}`);
 });
+
+console.log("SMTP_USER:", process.env.SMTP_USER);
+console.log("SMTP_PASS EXISTS:", !!process.env.SMTP_PASS);
+console.log("DATABASE_URL EXISTS:", !!process.env.DATABASE_URL);

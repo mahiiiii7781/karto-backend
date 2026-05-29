@@ -328,13 +328,17 @@ export const sendOtp = async (req, res) => {
       success: true,
       message: "OTP sent successfully",
     });
-  } catch (error) {
-    console.error("Send OTP Error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Something went wrong while sending OTP",
-    });
-  }
+  } 
+  catch (error) {
+  console.error("Send OTP Error FULL:", error);
+
+  return res.status(500).json({
+    success: false,
+    message: "Something went wrong while sending OTP",
+    error: error.message,
+    code: error.code || null,
+  });
+}
 };
 
 export const verifyOtp = async (req, res) => {
