@@ -20,6 +20,7 @@
     "@prisma/adapter-pg": "^7.8.0",
     "@prisma/client": "^7.8.0",
     "bcryptjs": "^3.0.3",
+    "cloudinary": "^2.10.0",
     "cors": "^2.8.6",
     "crypto": "^1.0.1",
     "express": "^5.2.1",
@@ -31,6 +32,7 @@
     "razorpay": "^2.9.6",
     "react": "^19.2.6",
     "socket.io": "^4.8.3",
+    "streamifier": "^0.1.1",
     "twilio": "^6.0.2"
   }
 }

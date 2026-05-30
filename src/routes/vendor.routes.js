@@ -5,10 +5,26 @@ import {
   getVendors,
   getVendorById,
   getCategories,
+
   getVendorDashboard,
+
   getVendorOrders,
   updateVendorOrderStatus,
   updatePreparationTime,
+
+  getVendorMenu,
+  createVendorMenuItem,
+  updateVendorMenuItem,
+  deleteVendorMenuItem,
+
+  getVendorCategories,
+  createVendorCategory,
+  updateVendorCategory,
+  deleteVendorCategory,
+
+  updateVendorSettings,
+  setVendorBusyMode,
+
   getVendorPayments,
   getVendorEarningsGraph,
 } from "../controllers/vendor.controllers.js";
@@ -33,6 +49,10 @@ router.get(
   getVendorDashboard
 );
 
+/* =========================
+   VENDOR ORDERS APIs
+========================= */
+
 router.get(
   "/orders/me",
   protect,
@@ -54,12 +74,109 @@ router.patch(
   updatePreparationTime
 );
 
+/* =========================
+   VENDOR MENU APIs
+========================= */
+
+router.get(
+  "/menu",
+  protect,
+  allowRoles("VENDOR", "ADMIN"),
+  getVendorMenu
+);
+
+router.post(
+  "/menu",
+  protect,
+  allowRoles("VENDOR", "ADMIN"),
+  createVendorMenuItem
+);
+
+router.patch(
+  "/menu/:id",
+  protect,
+  allowRoles("VENDOR", "ADMIN"),
+  updateVendorMenuItem
+);
+
+router.delete(
+  "/menu/:id",
+  protect,
+  allowRoles("VENDOR", "ADMIN"),
+  deleteVendorMenuItem
+);
+
+/* =========================
+   VENDOR INTERNAL CATEGORY APIs
+========================= */
+
+router.get(
+  "/categories",
+  protect,
+  allowRoles("VENDOR", "ADMIN"),
+  getVendorCategories
+);
+
+router.post(
+  "/categories",
+  protect,
+  allowRoles("VENDOR", "ADMIN"),
+  createVendorCategory
+);
+
+router.patch(
+  "/categories/:id",
+  protect,
+  allowRoles("VENDOR", "ADMIN"),
+  updateVendorCategory
+);
+
+router.delete(
+  "/categories/:id",
+  protect,
+  allowRoles("VENDOR", "ADMIN"),
+  deleteVendorCategory
+);
+
+/* =========================
+   VENDOR SETTINGS APIs
+========================= */
+
+router.patch(
+  "/settings/me",
+  protect,
+  allowRoles("VENDOR", "ADMIN"),
+  updateVendorSettings
+);
+
+router.patch(
+  "/settings/busy-mode",
+  protect,
+  allowRoles("VENDOR", "ADMIN"),
+  setVendorBusyMode
+);
+
+router.patch(
+  "/settings/:id",
+  protect,
+  allowRoles("VENDOR", "ADMIN"),
+  updateVendorSettings
+);
+
+/* =========================
+   VENDOR PAYMENTS APIs
+========================= */
+
 router.get(
   "/payments/me",
   protect,
   allowRoles("VENDOR", "ADMIN"),
   getVendorPayments
 );
+
+/* =========================
+   VENDOR GRAPH APIs
+========================= */
 
 router.get(
   "/earnings/graph",

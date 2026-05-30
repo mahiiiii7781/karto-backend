@@ -43,9 +43,99 @@ const safeNotify = async payload => {
   }
 };
 
+const parseTimeToMinutes = value => {
+  if (!value) return null;
+
+  const [h, m] = String(value).split(":").map(Number);
+
+  if (Number.isNaN(h) || Number.isNaN(m)) return null;
+
+  return h * 60 + m;
+};
+
+const getDayName = date => {
+  return date
+    .toLocaleDateString("en-IN", { weekday: "long" })
+    .toLowerCase();
+};
+
+const isRestaurantAvailableNow = restaurant => {
+  const now = new Date();
+
+  if (!restaurant.isOpen) {
+    return {
+      allowed: false,
+      message: "Store is currently closed",
+    };
+  }
+
+  if (restaurant.isAcceptingOrders === false) {
+    return {
+      allowed: false,
+      message: "Store is not accepting orders right now",
+    };
+  }
+
+  if (restaurant.busyUntil && new Date(restaurant.busyUntil) > now) {
+    const time = new Date(restaurant.busyUntil).toLocaleTimeString("en-IN", {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+
+    return {
+      allowed: false,
+      message: `Store is busy right now. Try again after ${time}`,
+    };
+  }
+
+  if (
+    restaurant.weeklyOffDay &&
+    String(restaurant.weeklyOffDay).toLowerCase() === getDayName(now)
+  ) {
+    return {
+      allowed: false,
+      message: `Store is closed today due to weekly off`,
+    };
+  }
+
+  const openMinutes = parseTimeToMinutes(restaurant.openingTime);
+  const closeMinutes = parseTimeToMinutes(restaurant.closingTime);
+
+  if (openMinutes !== null && closeMinutes !== null) {
+    const currentMinutes = now.getHours() * 60 + now.getMinutes();
+
+    let isInsideTime = false;
+
+    if (openMinutes <= closeMinutes) {
+      isInsideTime =
+        currentMinutes >= openMinutes && currentMinutes <= closeMinutes;
+    } else {
+      isInsideTime =
+        currentMinutes >= openMinutes || currentMinutes <= closeMinutes;
+    }
+
+    if (!isInsideTime) {
+      return {
+        allowed: false,
+        message: `Store accepts orders from ${restaurant.openingTime} to ${restaurant.closingTime}`,
+      };
+    }
+  }
+
+  return {
+    allowed: true,
+    message: "Store is available",
+  };
+};
+
 export const createOrder = async (req, res) => {
   try {
-    const { addressId, paymentMethod = "COD", customerNote, couponCode } = req.body;
+    const {
+      addressId,
+      paymentMethod = "COD",
+      customerNote,
+      couponCode,
+    } = req.body;
 
     if (!addressId) {
       return res.status(400).json({
@@ -92,6 +182,9 @@ export const createOrder = async (req, res) => {
 
     const restaurant = await prisma.restaurant.findUnique({
       where: { id: restaurantId },
+      include: {
+        timings: true,
+      },
     });
 
     if (!restaurant) {
@@ -101,10 +194,23 @@ export const createOrder = async (req, res) => {
       });
     }
 
-    if (!restaurant.isOpen) {
+    const availability = isRestaurantAvailableNow(restaurant);
+
+    if (!availability.allowed) {
       return res.status(400).json({
         success: false,
-        message: "Store is currently closed",
+        message: availability.message,
+      });
+    }
+
+    const unavailableItem = cartItems.find(item => {
+      return !item.menuItem || item.menuItem.isAvailable === false;
+    });
+
+    if (unavailableItem) {
+      return res.status(400).json({
+        success: false,
+        message: `${unavailableItem.menuItem?.name || "Item"} is currently unavailable`,
       });
     }
 
@@ -125,7 +231,10 @@ export const createOrder = async (req, res) => {
       });
 
       if (!coupon || !coupon.isActive) {
-        return res.status(400).json({ success: false, message: "Invalid coupon" });
+        return res.status(400).json({
+          success: false,
+          message: "Invalid coupon",
+        });
       }
 
       const now = new Date();
@@ -205,6 +314,13 @@ export const createOrder = async (req, res) => {
 
     const finalAmount = itemTotal + deliveryFee + taxAmount - discount;
 
+    const defaultPrepTime =
+      Number(restaurant.defaultPrepTime) ||
+      Math.max(
+        ...cartItems.map(item => Number(item.menuItem?.prepTimeMin || 20)),
+        20
+      );
+
     const order = await prisma.$transaction(async tx => {
       const newOrder = await tx.order.create({
         data: {
@@ -226,7 +342,7 @@ export const createOrder = async (req, res) => {
 
           orderNumber: generateOrderNumber(),
           customerNote: customerNote || null,
-          estimatedPreparationMinutes: 25,
+          estimatedPreparationMinutes: defaultPrepTime,
 
           items: {
             create: cartItems.map(item => ({
@@ -283,6 +399,7 @@ export const createOrder = async (req, res) => {
     });
 
     const customerMsg = notificationTemplates.ORDER_PLACED_CUSTOMER();
+
     await safeNotify({
       userId: order.userId,
       type: "ORDER",

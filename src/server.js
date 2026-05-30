@@ -24,6 +24,7 @@ import reviewRoutes from "./routes/review.routes.js";
 import recentlyViewedRoutes from "./routes/recentlyViewed.routes.js";
 import couponRoutes from "./routes/coupon.routes.js";
 import pushRoutes from "./routes/push.routes.js";
+import uploadRoutes from "./routes/upload.routes.js";
 const app = express();
 
 
@@ -209,6 +210,7 @@ app.use("/api/recently-viewed", recentlyViewedRoutes);
 app.use("/uploads", express.static("uploads"));
 app.use("/api/coupons", couponRoutes);
 app.use("/api/push", pushRoutes);
+app.use("/api/upload", uploadRoutes);
 // 404 handler
 app.use((req, res) => {
   res.status(404).json({

@@ -1,14 +1,32 @@
 import bcrypt from "bcryptjs";
 import prisma from "../prisma.js";
 import { emitOrderStatus } from "../config/socket.js";
+import { uploadToCloudinary } from "../utils/cloudinaryUpload.js";
 
 const allowedRoles = ["CUSTOMER", "VENDOR", "RIDER", "ADMIN"];
 
 const moneyNumber = (value) => Number(value || 0);
 
-const fileUrl = (req) => {
+const fileUrl = async (req, folder = "misc") => {
   if (!req.file) return undefined;
-  return `${req.protocol}://${req.get("host")}/uploads/${req.file.filename}`;
+  return await uploadToCloudinary(req.file, folder);
+};
+
+const boolValue = (value) => {
+  if (typeof value === "boolean") return value;
+  return String(value) === "true";
+};
+
+const parseJsonArray = (value) => {
+  if (!value) return [];
+  if (Array.isArray(value)) return value;
+
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
 };
 
 const calcIncome = (orders = []) => {
@@ -35,15 +53,15 @@ const calcIncome = (orders = []) => {
 
 export const getAdminDashboard = async (req, res) => {
   try {
-   const activeStatuses = [
-  "PLACED",
-  "ACCEPTED_BY_VENDOR",
-  "PREPARING",
-  "READY_FOR_PICKUP",
-  "ASSIGNED_TO_RIDER",
-  "PICKED_UP",
-  "OUT_FOR_DELIVERY",
-];
+    const activeStatuses = [
+      "PLACED",
+      "ACCEPTED_BY_VENDOR",
+      "PREPARING",
+      "READY_FOR_PICKUP",
+      "ASSIGNED_TO_RIDER",
+      "PICKED_UP",
+      "OUT_FOR_DELIVERY",
+    ];
 
     const [
       totalUsers,
@@ -66,9 +84,26 @@ export const getAdminDashboard = async (req, res) => {
         take: 10,
         orderBy: { createdAt: "desc" },
         include: {
-          user: { select: { id: true, fullName: true, email: true, phone: true } },
-          restaurant: { include: { city: true } },
-          rider: { select: { id: true, fullName: true, phone: true } },
+          user: {
+            select: {
+              id: true,
+              fullName: true,
+              email: true,
+              phone: true,
+            },
+          },
+          restaurant: {
+            include: {
+              city: true,
+            },
+          },
+          rider: {
+            select: {
+              id: true,
+              fullName: true,
+              phone: true,
+            },
+          },
           items: true,
         },
       }),
@@ -139,23 +174,30 @@ export const createRoleUser = async (req, res) => {
 
     const existing = await prisma.user.findFirst({
       where: {
-        OR: [{ email: email.trim().toLowerCase() }, phone ? { phone } : undefined].filter(Boolean),
+        OR: [
+          { email: email.trim().toLowerCase() },
+          phone ? { phone: phone.trim() } : undefined,
+        ].filter(Boolean),
       },
     });
 
     if (existing) {
-      return res.status(409).json({ success: false, message: "Email or phone already exists" });
+      return res.status(409).json({
+        success: false,
+        message: "Email or phone already exists",
+      });
     }
 
+    const imageUrl = await fileUrl(req, "users");
     const hashedPassword = await bcrypt.hash(password, 10);
 
     const user = await prisma.user.create({
       data: {
         fullName: fullName.trim(),
         email: email.trim().toLowerCase(),
-        phone: phone || null,
+        phone: phone?.trim() || null,
         password: hashedPassword,
-        avatarUrl: avatarUrl || null,
+        avatarUrl: imageUrl || avatarUrl || null,
         role,
         isActive: true,
       },
@@ -205,7 +247,12 @@ export const updateUserRole = async (req, res) => {
       },
     });
 
-    return res.json({ success: true, message: "User role updated", user, data: user });
+    return res.json({
+      success: true,
+      message: "User role updated",
+      user,
+      data: user,
+    });
   } catch (error) {
     console.error("Update Role Error:", error);
     return res.status(500).json({ success: false, message: error.message });
@@ -259,7 +306,10 @@ export const createCity = async (req, res) => {
 
     const city = await prisma.city.upsert({
       where: { code: code.trim().toUpperCase() },
-      update: { name: name.trim(), isActive: true },
+      update: {
+        name: name.trim(),
+        isActive: true,
+      },
       create: {
         name: name.trim(),
         code: code.trim().toUpperCase(),
@@ -293,7 +343,7 @@ export const getCities = async (req, res) => {
 };
 
 /* =========================
-   VENDOR CREATE + LIST
+   VENDORS
 ========================= */
 
 export const createVendorByAdmin = async (req, res) => {
@@ -311,19 +361,22 @@ export const createVendorByAdmin = async (req, res) => {
       type = "RESTAURANT",
       commission = 0,
       role = "VENDOR",
+      imageUrl,
     } = req.body;
-
-    const imageUrl = fileUrl(req) || req.body.imageUrl || null;
 
     if (!cityId || !name || !ownerName || !ownerMobileNo || !phone || !email || !password || !address) {
       return res.status(400).json({
         success: false,
-        message: "cityId, name, ownerName, ownerMobileNo, phone, email, password and address are required",
+        message:
+          "cityId, name, ownerName, ownerMobileNo, phone, email, password and address are required",
       });
     }
 
     if (role !== "VENDOR") {
-      return res.status(400).json({ success: false, message: "Vendor create role must be VENDOR" });
+      return res.status(400).json({
+        success: false,
+        message: "Vendor create role must be VENDOR",
+      });
     }
 
     const city = await prisma.city.findUnique({ where: { id: cityId } });
@@ -334,6 +387,7 @@ export const createVendorByAdmin = async (req, res) => {
 
     if (categoryId) {
       const category = await prisma.category.findUnique({ where: { id: categoryId } });
+
       if (!category) {
         return res.status(404).json({ success: false, message: "Category not found" });
       }
@@ -349,19 +403,29 @@ export const createVendorByAdmin = async (req, res) => {
     });
 
     if (existingUser) {
-      return res.status(409).json({ success: false, message: "Vendor user already exists" });
+      return res.status(409).json({
+        success: false,
+        message: "Vendor user already exists",
+      });
     }
 
     const existingRestaurant = await prisma.restaurant.findFirst({
       where: {
-        OR: [{ email: email.trim().toLowerCase() }, { phone: phone.trim() }],
+        OR: [
+          { email: email.trim().toLowerCase() },
+          { phone: phone.trim() },
+        ],
       },
     });
 
     if (existingRestaurant) {
-      return res.status(409).json({ success: false, message: "Vendor restaurant already exists" });
+      return res.status(409).json({
+        success: false,
+        message: "Vendor restaurant already exists",
+      });
     }
 
+    const finalImageUrl = (await fileUrl(req, "vendors")) || imageUrl || null;
     const hashedPassword = await bcrypt.hash(password, 10);
 
     const result = await prisma.$transaction(async (tx) => {
@@ -372,7 +436,7 @@ export const createVendorByAdmin = async (req, res) => {
           phone: ownerMobileNo.trim(),
           password: hashedPassword,
           role: "VENDOR",
-          avatarUrl: imageUrl,
+          avatarUrl: finalImageUrl,
           isActive: true,
         },
         select: {
@@ -391,18 +455,15 @@ export const createVendorByAdmin = async (req, res) => {
           vendorId: vendorUser.id,
           cityId,
           categoryId: categoryId || null,
-
           name: name.trim(),
           ownerName: ownerName.trim(),
           ownerMobileNo: ownerMobileNo.trim(),
           phone: phone.trim(),
           email: email.trim().toLowerCase(),
           address: address.trim(),
-          imageUrl,
+          imageUrl: finalImageUrl,
           type,
           commission: Number(commission || 0),
-
-          isActive: true,
           isOpen: true,
         },
         include: {
@@ -535,12 +596,12 @@ export const toggleRestaurantStatus = async (req, res) => {
 
     const restaurant = await prisma.restaurant.update({
       where: { id },
-      data: { isActive: Boolean(isActive) },
+      data: { isOpen: Boolean(isActive) },
     });
 
     return res.json({
       success: true,
-      message: restaurant.isActive ? "Vendor activated" : "Vendor blocked",
+      message: restaurant.isOpen ? "Vendor activated" : "Vendor blocked",
       restaurant,
       data: restaurant,
     });
@@ -549,9 +610,270 @@ export const toggleRestaurantStatus = async (req, res) => {
     return res.status(500).json({ success: false, message: error.message });
   }
 };
+export const getVendorCategories = async (req, res) => {
+  try {
+    const { restaurantId } = req.query;
 
+    const data = await prisma.vendorCategory.findMany({
+      where: restaurantId && restaurantId !== "ALL" ? { restaurantId } : {},
+      include: {
+        restaurant: true,
+        subCategories: true,
+        menuItems: true,
+      },
+      orderBy: { createdAt: "desc" },
+    });
+
+    return res.json({ success: true, categories: data, data });
+  } catch (error) {
+    console.error("Get Vendor Categories Error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const createVendorCategory = async (req, res) => {
+  try {
+    const { restaurantId, name, description, imageUrl } = req.body;
+
+    if (!restaurantId || !name?.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "restaurantId and name are required",
+      });
+    }
+
+    const restaurant = await prisma.restaurant.findUnique({
+      where: { id: restaurantId },
+    });
+
+    if (!restaurant) {
+      return res.status(404).json({
+        success: false,
+        message: "Vendor not found",
+      });
+    }
+
+    const finalImageUrl =
+      (await fileUrl(req, "vendor-categories")) || imageUrl || null;
+
+    const data = await prisma.vendorCategory.create({
+      data: {
+        restaurantId,
+        name: name.trim(),
+        description: description?.trim() || null,
+        imageUrl: finalImageUrl,
+        isActive: true,
+      },
+      include: {
+        restaurant: true,
+        subCategories: true,
+        menuItems: true,
+      },
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: "Vendor category created successfully",
+      category: data,
+      data,
+    });
+  } catch (error) {
+    console.error("Create Vendor Category Error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const updateVendorCategory = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, description, imageUrl, isActive } = req.body;
+
+    const finalImageUrl = await fileUrl(req, "vendor-categories");
+
+    const data = await prisma.vendorCategory.update({
+      where: { id },
+      data: {
+        ...(name !== undefined && { name: name.trim() }),
+        ...(description !== undefined && {
+          description: description?.trim() || null,
+        }),
+        ...(isActive !== undefined && { isActive: boolValue(isActive) }),
+        ...(finalImageUrl && { imageUrl: finalImageUrl }),
+        ...(!finalImageUrl &&
+          imageUrl !== undefined && { imageUrl: imageUrl || null }),
+      },
+      include: {
+        restaurant: true,
+        subCategories: true,
+        menuItems: true,
+      },
+    });
+
+    return res.json({
+      success: true,
+      message: "Vendor category updated successfully",
+      category: data,
+      data,
+    });
+  } catch (error) {
+    console.error("Update Vendor Category Error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const deleteVendorCategory = async (req, res) => {
+  try {
+    await prisma.vendorCategory.delete({
+      where: { id: req.params.id },
+    });
+
+    return res.json({
+      success: true,
+      message: "Vendor category deleted successfully",
+    });
+  } catch (error) {
+    console.error("Delete Vendor Category Error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const getVendorSubCategories = async (req, res) => {
+  try {
+    const { vendorCategoryId, restaurantId } = req.query;
+
+    const data = await prisma.vendorSubCategory.findMany({
+      where: {
+        ...(vendorCategoryId && vendorCategoryId !== "ALL"
+          ? { vendorCategoryId }
+          : {}),
+        ...(restaurantId && restaurantId !== "ALL"
+          ? { vendorCategory: { restaurantId } }
+          : {}),
+      },
+      include: {
+        vendorCategory: {
+          include: {
+            restaurant: true,
+          },
+        },
+        menuItems: true,
+      },
+      orderBy: { createdAt: "desc" },
+    });
+
+    return res.json({ success: true, subCategories: data, data });
+  } catch (error) {
+    console.error("Get Vendor Subcategories Error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const createVendorSubCategory = async (req, res) => {
+  try {
+    const { vendorCategoryId, name, description, imageUrl } = req.body;
+
+    if (!vendorCategoryId || !name?.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "vendorCategoryId and name are required",
+      });
+    }
+
+    const vendorCategory = await prisma.vendorCategory.findUnique({
+      where: { id: vendorCategoryId },
+    });
+
+    if (!vendorCategory) {
+      return res.status(404).json({
+        success: false,
+        message: "Vendor category not found",
+      });
+    }
+
+    const finalImageUrl =
+      (await fileUrl(req, "vendor-subcategories")) || imageUrl || null;
+
+    const data = await prisma.vendorSubCategory.create({
+      data: {
+        vendorCategoryId,
+        name: name.trim(),
+        description: description?.trim() || null,
+        imageUrl: finalImageUrl,
+        isActive: true,
+      },
+      include: {
+        vendorCategory: true,
+        menuItems: true,
+      },
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: "Vendor subcategory created successfully",
+      subCategory: data,
+      data,
+    });
+  } catch (error) {
+    console.error("Create Vendor Subcategory Error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const updateVendorSubCategory = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { vendorCategoryId, name, description, imageUrl, isActive } = req.body;
+
+    const finalImageUrl = await fileUrl(req, "vendor-subcategories");
+
+    const data = await prisma.vendorSubCategory.update({
+      where: { id },
+      data: {
+        ...(vendorCategoryId !== undefined && { vendorCategoryId }),
+        ...(name !== undefined && { name: name.trim() }),
+        ...(description !== undefined && {
+          description: description?.trim() || null,
+        }),
+        ...(isActive !== undefined && { isActive: boolValue(isActive) }),
+        ...(finalImageUrl && { imageUrl: finalImageUrl }),
+        ...(!finalImageUrl &&
+          imageUrl !== undefined && { imageUrl: imageUrl || null }),
+      },
+      include: {
+        vendorCategory: true,
+        menuItems: true,
+      },
+    });
+
+    return res.json({
+      success: true,
+      message: "Vendor subcategory updated successfully",
+      subCategory: data,
+      data,
+    });
+  } catch (error) {
+    console.error("Update Vendor Subcategory Error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const deleteVendorSubCategory = async (req, res) => {
+  try {
+    await prisma.vendorSubCategory.delete({
+      where: { id: req.params.id },
+    });
+
+    return res.json({
+      success: true,
+      message: "Vendor subcategory deleted successfully",
+    });
+  } catch (error) {
+    console.error("Delete Vendor Subcategory Error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
 /* =========================
-   RIDER CREATE + LIST
+   RIDERS
 ========================= */
 
 export const createRiderByAdmin = async (req, res) => {
@@ -566,19 +888,22 @@ export const createRiderByAdmin = async (req, res) => {
       vehicleType = "BIKE",
       address,
       role = "RIDER",
+      avatarUrl,
     } = req.body;
-
-    const avatarUrl = fileUrl(req) || req.body.avatarUrl || null;
 
     if (!cityId || !fullName || !email || !password || !phone || !vehicleNo || !address) {
       return res.status(400).json({
         success: false,
-        message: "cityId, fullName, email, password, phone, vehicleNo and address are required",
+        message:
+          "cityId, fullName, email, password, phone, vehicleNo and address are required",
       });
     }
 
     if (role !== "RIDER") {
-      return res.status(400).json({ success: false, message: "Rider create role must be RIDER" });
+      return res.status(400).json({
+        success: false,
+        message: "Rider create role must be RIDER",
+      });
     }
 
     const city = await prisma.city.findUnique({ where: { id: cityId } });
@@ -589,14 +914,21 @@ export const createRiderByAdmin = async (req, res) => {
 
     const existing = await prisma.user.findFirst({
       where: {
-        OR: [{ email: email.trim().toLowerCase() }, { phone: phone.trim() }],
+        OR: [
+          { email: email.trim().toLowerCase() },
+          { phone: phone.trim() },
+        ],
       },
     });
 
     if (existing) {
-      return res.status(409).json({ success: false, message: "Rider already exists" });
+      return res.status(409).json({
+        success: false,
+        message: "Rider already exists",
+      });
     }
 
+    const finalAvatarUrl = (await fileUrl(req, "riders")) || avatarUrl || null;
     const hashedPassword = await bcrypt.hash(password, 10);
 
     const rider = await prisma.user.create({
@@ -605,11 +937,9 @@ export const createRiderByAdmin = async (req, res) => {
         email: email.trim().toLowerCase(),
         phone: phone.trim(),
         password: hashedPassword,
-        avatarUrl,
+        avatarUrl: finalAvatarUrl,
         role: "RIDER",
         isActive: true,
-
-        // These fields require schema support.
         cityId,
         address: address.trim(),
         vehicleNo: vehicleNo.trim(),
@@ -650,7 +980,7 @@ export const getAdminRiders = async (req, res) => {
     const riders = await prisma.user.findMany({
       where: {
         role: "RIDER",
-        ...(cityId ? { cityId } : {}),
+        ...(cityId && cityId !== "ALL" ? { cityId } : {}),
       },
       orderBy: { createdAt: "desc" },
       select: {
@@ -672,7 +1002,10 @@ export const getAdminRiders = async (req, res) => {
 
     const data = riders.map((rider) => {
       const delivered = rider.riderOrders.filter((o) => o.status === "DELIVERED");
-      const totalDeliveryFee = delivered.reduce((sum, o) => sum + moneyNumber(o.deliveryFee), 0);
+      const totalDeliveryFee = delivered.reduce(
+        (sum, o) => sum + moneyNumber(o.deliveryFee),
+        0
+      );
 
       return {
         ...rider,
@@ -689,7 +1022,7 @@ export const getAdminRiders = async (req, res) => {
 };
 
 /* =========================
-   CATEGORIES
+   BUSINESS CATEGORIES
 ========================= */
 
 export const getCategories = async (req, res) => {
@@ -712,7 +1045,7 @@ export const getCategories = async (req, res) => {
 
 export const createCategory = async (req, res) => {
   try {
-    const { name, description } = req.body;
+    const { name, description, imageUrl } = req.body;
 
     if (!name?.trim()) {
       return res.status(400).json({
@@ -721,11 +1054,13 @@ export const createCategory = async (req, res) => {
       });
     }
 
+    const finalImageUrl = (await fileUrl(req, "categories")) || imageUrl || null;
+
     const category = await prisma.category.create({
       data: {
         name: name.trim(),
         description: description?.trim() || null,
-        imageUrl: fileUrl(req) || null,
+        imageUrl: finalImageUrl,
       },
     });
 
@@ -744,15 +1079,18 @@ export const createCategory = async (req, res) => {
 export const updateCategory = async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, description } = req.body;
+    const { name, description, imageUrl } = req.body;
+
+    const finalImageUrl = await fileUrl(req, "categories");
 
     const updateData = {
       ...(name !== undefined && { name: name.trim() }),
-      ...(description !== undefined && { description: description?.trim() || null }),
+      ...(description !== undefined && {
+        description: description?.trim() || null,
+      }),
+      ...(finalImageUrl && { imageUrl: finalImageUrl }),
+      ...(!finalImageUrl && imageUrl !== undefined && { imageUrl: imageUrl || null }),
     };
-
-    const image = fileUrl(req);
-    if (image) updateData.imageUrl = image;
 
     const category = await prisma.category.update({
       where: { id },
@@ -774,7 +1112,11 @@ export const updateCategory = async (req, res) => {
 export const deleteCategory = async (req, res) => {
   try {
     await prisma.category.delete({ where: { id: req.params.id } });
-    return res.json({ success: true, message: "Category deleted successfully" });
+
+    return res.json({
+      success: true,
+      message: "Category deleted successfully",
+    });
   } catch (error) {
     console.error("Delete Category Error:", error);
     return res.status(500).json({ success: false, message: error.message });
@@ -782,7 +1124,7 @@ export const deleteCategory = async (req, res) => {
 };
 
 /* =========================
-   PRODUCT SUBCATEGORIES
+   SUBCATEGORIES
 ========================= */
 
 export const getSubCategories = async (req, res) => {
@@ -798,7 +1140,11 @@ export const getSubCategories = async (req, res) => {
       orderBy: { name: "asc" },
     });
 
-    return res.json({ success: true, subCategories, data: subCategories });
+    return res.json({
+      success: true,
+      subCategories,
+      data: subCategories,
+    });
   } catch (error) {
     console.error("Get Subcategories Error:", error);
     return res.status(500).json({ success: false, message: error.message });
@@ -807,7 +1153,7 @@ export const getSubCategories = async (req, res) => {
 
 export const createSubCategory = async (req, res) => {
   try {
-    const { categoryId, name, description } = req.body;
+    const { categoryId, name, description, imageUrl } = req.body;
 
     if (!categoryId || !name?.trim()) {
       return res.status(400).json({
@@ -816,17 +1162,26 @@ export const createSubCategory = async (req, res) => {
       });
     }
 
-    const category = await prisma.category.findUnique({ where: { id: categoryId } });
+    const category = await prisma.category.findUnique({
+      where: { id: categoryId },
+    });
+
     if (!category) {
-      return res.status(404).json({ success: false, message: "Category not found" });
+      return res.status(404).json({
+        success: false,
+        message: "Category not found",
+      });
     }
+
+    const finalImageUrl =
+      (await fileUrl(req, "subcategories")) || imageUrl || null;
 
     const subCategory = await prisma.productSubCategory.create({
       data: {
         categoryId,
         name: name.trim(),
         description: description?.trim() || null,
-        imageUrl: fileUrl(req) || null,
+        imageUrl: finalImageUrl,
       },
       include: {
         category: true,
@@ -849,16 +1204,19 @@ export const createSubCategory = async (req, res) => {
 export const updateSubCategory = async (req, res) => {
   try {
     const { id } = req.params;
-    const { categoryId, name, description } = req.body;
+    const { categoryId, name, description, imageUrl } = req.body;
+
+    const finalImageUrl = await fileUrl(req, "subcategories");
 
     const updateData = {
       ...(categoryId !== undefined && { categoryId }),
       ...(name !== undefined && { name: name.trim() }),
-      ...(description !== undefined && { description: description?.trim() || null }),
+      ...(description !== undefined && {
+        description: description?.trim() || null,
+      }),
+      ...(finalImageUrl && { imageUrl: finalImageUrl }),
+      ...(!finalImageUrl && imageUrl !== undefined && { imageUrl: imageUrl || null }),
     };
-
-    const image = fileUrl(req);
-    if (image) updateData.imageUrl = image;
 
     const subCategory = await prisma.productSubCategory.update({
       where: { id },
@@ -883,8 +1241,14 @@ export const updateSubCategory = async (req, res) => {
 
 export const deleteSubCategory = async (req, res) => {
   try {
-    await prisma.productSubCategory.delete({ where: { id: req.params.id } });
-    return res.json({ success: true, message: "Subcategory deleted successfully" });
+    await prisma.productSubCategory.delete({
+      where: { id: req.params.id },
+    });
+
+    return res.json({
+      success: true,
+      message: "Subcategory deleted successfully",
+    });
   } catch (error) {
     console.error("Delete Subcategory Error:", error);
     return res.status(500).json({ success: false, message: error.message });
@@ -894,28 +1258,6 @@ export const deleteSubCategory = async (req, res) => {
 /* =========================
    MENU ITEMS
 ========================= */
-
-/* =========================
-   MENU ITEMS
-========================= */
-
-const parseJsonArray = value => {
-  if (!value) return [];
-
-  if (Array.isArray(value)) return value;
-
-  try {
-    const parsed = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-};
-
-const boolValue = value => {
-  if (typeof value === "boolean") return value;
-  return String(value) === "true";
-};
 
 export const getAdminMenuItems = async (req, res) => {
   try {
@@ -961,22 +1303,19 @@ export const createMenuItem = async (req, res) => {
       restaurantId,
       categoryId,
       subCategoryId,
-
       name,
       description,
       price,
-
+      imageUrl,
       isVegetarian,
       isVeg,
       isPopular,
       isAvailable = "true",
       isBestSeller,
-
       calories,
       servingInfo,
       prepTimeMin,
       spiceLevel,
-
       addons,
       customizations,
     } = req.body;
@@ -1025,6 +1364,7 @@ export const createMenuItem = async (req, res) => {
       }
     }
 
+    const finalImageUrl = (await fileUrl(req, "products")) || imageUrl || null;
     const finalAddons = parseJsonArray(addons);
     const finalCustomizations = parseJsonArray(customizations);
 
@@ -1033,39 +1373,33 @@ export const createMenuItem = async (req, res) => {
         restaurantId,
         categoryId: categoryId || null,
         subCategoryId: subCategoryId || null,
-
         name: name.trim(),
         description: description?.trim() || null,
         price: Number(price),
-
-        imageUrl: fileUrl(req) || req.body.imageUrl || null,
-
+        imageUrl: finalImageUrl,
         isVegetarian: boolValue(isVegetarian || isVeg),
         isVeg: boolValue(isVeg || isVegetarian),
         isPopular: boolValue(isPopular),
         isBestSeller: boolValue(isBestSeller),
         isAvailable: String(isAvailable) !== "false",
-
         calories: calories ? Number(calories) : null,
         servingInfo: servingInfo?.trim() || null,
         prepTimeMin: prepTimeMin ? Number(prepTimeMin) : 20,
         spiceLevel: spiceLevel ? Number(spiceLevel) : 0,
-
         addons: {
           create: finalAddons
-            .filter(a => a?.title)
-            .map(a => ({
+            .filter((a) => a?.title)
+            .map((a) => ({
               title: String(a.title).trim(),
               price: Number(a.price || 0),
               imageUrl: a.imageUrl || null,
               isActive: a.isActive === undefined ? true : Boolean(a.isActive),
             })),
         },
-
         customizations: {
           create: finalCustomizations
-            .filter(c => c?.title)
-            .map(c => ({
+            .filter((c) => c?.title)
+            .map((c) => ({
               title: String(c.title).trim(),
               price: Number(c.price || 0),
               isRequired: Boolean(c.isRequired),
@@ -1099,52 +1433,46 @@ export const updateMenuItem = async (req, res) => {
     const {
       categoryId,
       subCategoryId,
-
       name,
       description,
       price,
-
+      imageUrl,
       isVegetarian,
       isVeg,
       isPopular,
       isAvailable,
       isBestSeller,
-
       calories,
       servingInfo,
       prepTimeMin,
       spiceLevel,
-
       addons,
       customizations,
     } = req.body;
 
+    const finalImageUrl = await fileUrl(req, "products");
+
     const updateData = {
       ...(categoryId !== undefined && { categoryId: categoryId || null }),
-      ...(subCategoryId !== undefined && { subCategoryId: subCategoryId || null }),
-
+      ...(subCategoryId !== undefined && {
+        subCategoryId: subCategoryId || null,
+      }),
       ...(name !== undefined && { name: name.trim() }),
       ...(description !== undefined && {
         description: description?.trim() || null,
       }),
       ...(price !== undefined && { price: Number(price) }),
-
       ...(isVegetarian !== undefined && {
         isVegetarian: boolValue(isVegetarian),
       }),
-      ...(isVeg !== undefined && {
-        isVeg: boolValue(isVeg),
-      }),
-      ...(isPopular !== undefined && {
-        isPopular: boolValue(isPopular),
-      }),
+      ...(isVeg !== undefined && { isVeg: boolValue(isVeg) }),
+      ...(isPopular !== undefined && { isPopular: boolValue(isPopular) }),
       ...(isBestSeller !== undefined && {
         isBestSeller: boolValue(isBestSeller),
       }),
       ...(isAvailable !== undefined && {
         isAvailable: String(isAvailable) !== "false",
       }),
-
       ...(calories !== undefined && {
         calories: calories ? Number(calories) : null,
       }),
@@ -1157,16 +1485,15 @@ export const updateMenuItem = async (req, res) => {
       ...(spiceLevel !== undefined && {
         spiceLevel: spiceLevel ? Number(spiceLevel) : 0,
       }),
+      ...(finalImageUrl && { imageUrl: finalImageUrl }),
+      ...(!finalImageUrl && imageUrl !== undefined && { imageUrl: imageUrl || null }),
     };
-
-    const image = fileUrl(req);
-    if (image) updateData.imageUrl = image;
 
     const finalAddons = parseJsonArray(addons);
     const finalCustomizations = parseJsonArray(customizations);
 
-    const menuItem = await prisma.$transaction(async tx => {
-      const updated = await tx.menuItem.update({
+    const menuItem = await prisma.$transaction(async (tx) => {
+      await tx.menuItem.update({
         where: { id: req.params.id },
         data: updateData,
       });
@@ -1179,8 +1506,8 @@ export const updateMenuItem = async (req, res) => {
         if (finalAddons.length) {
           await tx.menuItemAddon.createMany({
             data: finalAddons
-              .filter(a => a?.title)
-              .map(a => ({
+              .filter((a) => a?.title)
+              .map((a) => ({
                 menuItemId: req.params.id,
                 title: String(a.title).trim(),
                 price: Number(a.price || 0),
@@ -1199,8 +1526,8 @@ export const updateMenuItem = async (req, res) => {
         if (finalCustomizations.length) {
           await tx.menuItemCustomization.createMany({
             data: finalCustomizations
-              .filter(c => c?.title)
-              .map(c => ({
+              .filter((c) => c?.title)
+              .map((c) => ({
                 menuItemId: req.params.id,
                 title: String(c.title).trim(),
                 price: Number(c.price || 0),
@@ -1237,7 +1564,9 @@ export const updateMenuItem = async (req, res) => {
 
 export const deleteMenuItem = async (req, res) => {
   try {
-    await prisma.menuItem.delete({ where: { id: req.params.id } });
+    await prisma.menuItem.delete({
+      where: { id: req.params.id },
+    });
 
     return res.json({
       success: true,
@@ -1265,13 +1594,15 @@ export const createMenuItemAddon = async (req, res) => {
       });
     }
 
+    const finalImageUrl = (await fileUrl(req, "addons")) || imageUrl || null;
+
     const addon = await prisma.menuItemAddon.create({
       data: {
         menuItemId,
         title: title.trim(),
         price: Number(price || 0),
-        imageUrl: fileUrl(req) || imageUrl || null,
-        isActive: Boolean(isActive),
+        imageUrl: finalImageUrl,
+        isActive: boolValue(isActive),
       },
     });
 
@@ -1292,15 +1623,15 @@ export const updateMenuItemAddon = async (req, res) => {
     const { id } = req.params;
     const { title, price, imageUrl, isActive } = req.body;
 
+    const finalImageUrl = await fileUrl(req, "addons");
+
     const updateData = {
       ...(title !== undefined && { title: title.trim() }),
       ...(price !== undefined && { price: Number(price || 0) }),
-      ...(imageUrl !== undefined && { imageUrl: imageUrl || null }),
-      ...(isActive !== undefined && { isActive: Boolean(isActive) }),
+      ...(isActive !== undefined && { isActive: boolValue(isActive) }),
+      ...(finalImageUrl && { imageUrl: finalImageUrl }),
+      ...(!finalImageUrl && imageUrl !== undefined && { imageUrl: imageUrl || null }),
     };
-
-    const image = fileUrl(req);
-    if (image) updateData.imageUrl = image;
 
     const addon = await prisma.menuItemAddon.update({
       where: { id },
@@ -1356,8 +1687,8 @@ export const createMenuItemCustomization = async (req, res) => {
         menuItemId,
         title: title.trim(),
         price: Number(price || 0),
-        isRequired: Boolean(isRequired),
-        isActive: Boolean(isActive),
+        isRequired: boolValue(isRequired),
+        isActive: boolValue(isActive),
       },
     });
 
@@ -1383,8 +1714,8 @@ export const updateMenuItemCustomization = async (req, res) => {
       data: {
         ...(title !== undefined && { title: title.trim() }),
         ...(price !== undefined && { price: Number(price || 0) }),
-        ...(isRequired !== undefined && { isRequired: Boolean(isRequired) }),
-        ...(isActive !== undefined && { isActive: Boolean(isActive) }),
+        ...(isRequired !== undefined && { isRequired: boolValue(isRequired) }),
+        ...(isActive !== undefined && { isActive: boolValue(isActive) }),
       },
     });
 
@@ -1427,18 +1758,43 @@ export const getAdminOrders = async (req, res) => {
     const where = {};
 
     if (status && status !== "ALL") where.status = status;
-    if (vendorId) where.vendorId = vendorId;
-    if (cityId) where.restaurant = { cityId };
+    if (vendorId && vendorId !== "ALL") where.restaurantId = vendorId;
+    if (cityId && cityId !== "ALL") where.restaurant = { cityId };
 
     const orders = await prisma.order.findMany({
       where,
       include: {
-        user: { select: { id: true, fullName: true, email: true, phone: true } },
-        restaurant: { include: { city: true, vendor: true } },
-        rider: { select: { id: true, fullName: true, email: true, phone: true } },
+        user: {
+          select: {
+            id: true,
+            fullName: true,
+            email: true,
+            phone: true,
+          },
+        },
+        restaurant: {
+          include: {
+            city: true,
+            vendor: true,
+          },
+        },
+        rider: {
+          select: {
+            id: true,
+            fullName: true,
+            email: true,
+            phone: true,
+          },
+        },
         address: true,
-        items: { include: { menuItem: true } },
-        history: { orderBy: { createdAt: "asc" } },
+        items: {
+          include: {
+            menuItem: true,
+          },
+        },
+        history: {
+          orderBy: { createdAt: "asc" },
+        },
       },
       orderBy: { createdAt: "desc" },
     });
@@ -1452,23 +1808,43 @@ export const getAdminOrders = async (req, res) => {
 
 export const getAdminOrderById = async (req, res) => {
   try {
-    const { id } = req.params;
-
     const order = await prisma.order.findUnique({
-      where: { id },
+      where: { id: req.params.id },
       include: {
         user: true,
-        restaurant: { include: { city: true, vendor: true } },
+        restaurant: {
+          include: {
+            city: true,
+            vendor: true,
+          },
+        },
         rider: true,
         address: true,
-        items: { include: { menuItem: true } },
-        history: { orderBy: { createdAt: "asc" } },
-        riderLocations: { orderBy: { updatedAt: "desc" }, take: 1 },
+        items: {
+          include: {
+            menuItem: true,
+          },
+        },
+        history: {
+          include: {
+            changedByUser: {
+              select: {
+                id: true,
+                fullName: true,
+                role: true,
+              },
+            },
+          },
+          orderBy: { createdAt: "asc" },
+        },
       },
     });
 
     if (!order) {
-      return res.status(404).json({ success: false, message: "Order not found" });
+      return res.status(404).json({
+        success: false,
+        message: "Order not found",
+      });
     }
 
     return res.json({ success: true, order, data: order });
@@ -1484,33 +1860,38 @@ export const updateOrderStatusByAdmin = async (req, res) => {
     const { status, note } = req.body;
 
     const allowedStatuses = [
-  "PLACED",
-  "ACCEPTED_BY_VENDOR",
-  "PREPARING",
-  "READY_FOR_PICKUP",
-  "ASSIGNED_TO_RIDER",
-  "PICKED_UP",
-  "OUT_FOR_DELIVERY",
-  "DELIVERED",
-  "CANCELLED",
-];
+      "PLACED",
+      "ACCEPTED_BY_VENDOR",
+      "PREPARING",
+      "READY_FOR_PICKUP",
+      "ASSIGNED_TO_RIDER",
+      "PICKED_UP",
+      "OUT_FOR_DELIVERY",
+      "DELIVERED",
+      "CANCELLED",
+    ];
 
     if (!allowedStatuses.includes(status)) {
-      return res.status(400).json({ success: false, message: "Invalid status" });
+      return res.status(400).json({
+        success: false,
+        message: "Invalid status",
+      });
     }
 
     const timeFieldMap = {
-  ACCEPTED_BY_VENDOR: "acceptedAt",
-  PREPARING: "preparingAt",
-  READY_FOR_PICKUP: "readyAt",
-  PICKED_UP: "pickedAt",
-  DELIVERED: "deliveredAt",
-  CANCELLED: "cancelledAt",
-};
+      ACCEPTED_BY_VENDOR: "acceptedAt",
+      PREPARING: "preparingAt",
+      READY_FOR_PICKUP: "readyAt",
+      PICKED_UP: "pickedAt",
+      DELIVERED: "deliveredAt",
+      CANCELLED: "cancelledAt",
+    };
 
     const updateData = { status };
 
-    if (timeFieldMap[status]) updateData[timeFieldMap[status]] = new Date();
+    if (timeFieldMap[status]) {
+      updateData[timeFieldMap[status]] = new Date();
+    }
 
     const order = await prisma.$transaction(async (tx) => {
       const updated = await tx.order.update({
@@ -1556,15 +1937,25 @@ export const assignRiderByAdmin = async (req, res) => {
     const { riderId } = req.body;
 
     if (!riderId) {
-      return res.status(400).json({ success: false, message: "riderId is required" });
+      return res.status(400).json({
+        success: false,
+        message: "riderId is required",
+      });
     }
 
     const rider = await prisma.user.findFirst({
-      where: { id: riderId, role: "RIDER", isActive: true },
+      where: {
+        id: riderId,
+        role: "RIDER",
+        isActive: true,
+      },
     });
 
     if (!rider) {
-      return res.status(404).json({ success: false, message: "Active rider not found" });
+      return res.status(404).json({
+        success: false,
+        message: "Active rider not found",
+      });
     }
 
     const order = await prisma.$transaction(async (tx) => {
@@ -1635,7 +2026,11 @@ export const getRiderBilling = async (req, res) => {
       orderBy: { deliveredAt: "desc" },
     });
 
-    const deliveryEarnings = orders.reduce((sum, o) => sum + moneyNumber(o.deliveryFee), 0);
+    const deliveryEarnings = orders.reduce(
+      (sum, o) => sum + moneyNumber(o.deliveryFee),
+      0
+    );
+
     const bonus = orders.length >= 20 ? 100 : 0;
     const deductions = 0;
     const payable = deliveryEarnings + bonus - deductions;
@@ -1670,11 +2065,16 @@ export const getMonthlyBilling = async (req, res) => {
         status: "DELIVERED",
         deliveredAt: { gte: start },
       },
-      include: { restaurant: true },
+      include: {
+        restaurant: true,
+      },
     });
 
     const income = calcIncome(deliveredOrders);
-    const deliveryFees = deliveredOrders.reduce((sum, o) => sum + moneyNumber(o.deliveryFee), 0);
+    const deliveryFees = deliveredOrders.reduce(
+      (sum, o) => sum + moneyNumber(o.deliveryFee),
+      0
+    );
 
     return res.json({
       success: true,
