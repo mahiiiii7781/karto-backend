@@ -1,5 +1,9 @@
 import prisma from "../prisma.js";
-import { emitOrderStatus } from "../config/socket.js";
+import {
+  emitOrderStatus,
+  emitNewOrder,
+  emitVendorDashboardUpdate,
+} from "../config/socket.js";
 import {
   sendPushToUser,
   notificationTemplates,
@@ -23,9 +27,7 @@ const calculateCouponDiscount = ({ coupon, itemTotal, deliveryFee }) => {
 
   if (coupon.type === "PERCENT") {
     discount = (itemTotal * toNumber(coupon.value)) / 100;
-    if (coupon.maxDiscount) {
-      discount = Math.min(discount, toNumber(coupon.maxDiscount));
-    }
+    if (coupon.maxDiscount) discount = Math.min(discount, toNumber(coupon.maxDiscount));
   }
 
   if (coupon.type === "FLAT") discount = toNumber(coupon.value);
@@ -45,35 +47,23 @@ const safeNotify = async payload => {
 
 const parseTimeToMinutes = value => {
   if (!value) return null;
-
   const [h, m] = String(value).split(":").map(Number);
-
   if (Number.isNaN(h) || Number.isNaN(m)) return null;
-
   return h * 60 + m;
 };
 
-const getDayName = date => {
-  return date
-    .toLocaleDateString("en-IN", { weekday: "long" })
-    .toLowerCase();
-};
+const getDayName = date =>
+  date.toLocaleDateString("en-IN", { weekday: "long" }).toLowerCase();
 
 const isRestaurantAvailableNow = restaurant => {
   const now = new Date();
 
   if (!restaurant.isOpen) {
-    return {
-      allowed: false,
-      message: "Store is currently closed",
-    };
+    return { allowed: false, message: "Store is currently closed" };
   }
 
   if (restaurant.isAcceptingOrders === false) {
-    return {
-      allowed: false,
-      message: "Store is not accepting orders right now",
-    };
+    return { allowed: false, message: "Store is not accepting orders right now" };
   }
 
   if (restaurant.busyUntil && new Date(restaurant.busyUntil) > now) {
@@ -94,7 +84,7 @@ const isRestaurantAvailableNow = restaurant => {
   ) {
     return {
       allowed: false,
-      message: `Store is closed today due to weekly off`,
+      message: "Store is closed today due to weekly off",
     };
   }
 
@@ -107,11 +97,9 @@ const isRestaurantAvailableNow = restaurant => {
     let isInsideTime = false;
 
     if (openMinutes <= closeMinutes) {
-      isInsideTime =
-        currentMinutes >= openMinutes && currentMinutes <= closeMinutes;
+      isInsideTime = currentMinutes >= openMinutes && currentMinutes <= closeMinutes;
     } else {
-      isInsideTime =
-        currentMinutes >= openMinutes || currentMinutes <= closeMinutes;
+      isInsideTime = currentMinutes >= openMinutes || currentMinutes <= closeMinutes;
     }
 
     if (!isInsideTime) {
@@ -122,10 +110,7 @@ const isRestaurantAvailableNow = restaurant => {
     }
   }
 
-  return {
-    allowed: true,
-    message: "Store is available",
-  };
+  return { allowed: true, message: "Store is available" };
 };
 
 export const createOrder = async (req, res) => {
@@ -182,9 +167,7 @@ export const createOrder = async (req, res) => {
 
     const restaurant = await prisma.restaurant.findUnique({
       where: { id: restaurantId },
-      include: {
-        timings: true,
-      },
+      include: { timings: true },
     });
 
     if (!restaurant) {
@@ -316,10 +299,7 @@ export const createOrder = async (req, res) => {
 
     const defaultPrepTime =
       Number(restaurant.defaultPrepTime) ||
-      Math.max(
-        ...cartItems.map(item => Number(item.menuItem?.prepTimeMin || 20)),
-        20
-      );
+      Math.max(...cartItems.map(item => Number(item.menuItem?.prepTimeMin || 20)), 20);
 
     const order = await prisma.$transaction(async tx => {
       const newOrder = await tx.order.create({
@@ -368,10 +348,24 @@ export const createOrder = async (req, res) => {
           },
         },
         include: {
-          items: { orderBy: { createdAt: "asc" } },
+          user: {
+            select: {
+              id: true,
+              fullName: true,
+              phone: true,
+              email: true,
+            },
+          },
+          items: {
+            include: {
+              menuItem: true,
+            },
+            orderBy: { createdAt: "asc" },
+          },
           restaurant: true,
           coupon: true,
           history: true,
+          address: true,
         },
       });
 
@@ -397,6 +391,11 @@ export const createOrder = async (req, res) => {
 
       return newOrder;
     });
+
+    if (order.vendorId) {
+      emitNewOrder(order.vendorId, order);
+      emitVendorDashboardUpdate(order.vendorId);
+    }
 
     const customerMsg = notificationTemplates.ORDER_PLACED_CUSTOMER();
 
