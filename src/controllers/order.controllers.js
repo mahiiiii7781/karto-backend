@@ -20,6 +20,14 @@ const generateOrderNumber = () => {
 };
 
 const toNumber = value => Number(value || 0);
+
+const round2 = value =>
+  Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
+
+const PLATFORM_FEE = round2(process.env.KARTO_PLATFORM_FEE || 5);
+const CGST_RATE = round2(process.env.KARTO_CGST_RATE || 2.5);
+const SGST_RATE = round2(process.env.KARTO_SGST_RATE || 2.5);
+
 const normalizeCouponCode = code => String(code || "").trim().toUpperCase();
 
 const calculateCouponDiscount = ({ coupon, itemTotal, deliveryFee }) => {
@@ -27,13 +35,67 @@ const calculateCouponDiscount = ({ coupon, itemTotal, deliveryFee }) => {
 
   if (coupon.type === "PERCENT") {
     discount = (itemTotal * toNumber(coupon.value)) / 100;
-    if (coupon.maxDiscount) discount = Math.min(discount, toNumber(coupon.maxDiscount));
+    if (coupon.maxDiscount) {
+      discount = Math.min(discount, toNumber(coupon.maxDiscount));
+    }
   }
 
-  if (coupon.type === "FLAT") discount = toNumber(coupon.value);
-  if (coupon.type === "FREE_DELIVERY") discount = toNumber(deliveryFee);
+  if (coupon.type === "FLAT") {
+    discount = toNumber(coupon.value);
+  }
 
-  return Math.max(0, Math.min(discount, itemTotal + deliveryFee));
+  if (coupon.type === "FREE_DELIVERY") {
+    discount = toNumber(deliveryFee);
+  }
+
+  return round2(Math.max(0, Math.min(discount, itemTotal + deliveryFee)));
+};
+
+const calculateOrderPricing = ({ cartItems, restaurant, discount = 0 }) => {
+  const itemTotal = round2(
+    cartItems.reduce((sum, item) => sum + toNumber(item.totalPrice), 0)
+  );
+
+  const deliveryFee = round2(restaurant?.deliveryFee || 0);
+  const platformFee = PLATFORM_FEE;
+
+  const cgstAmount = round2((itemTotal * CGST_RATE) / 100);
+  const sgstAmount = round2((itemTotal * SGST_RATE) / 100);
+  const taxAmount = round2(cgstAmount + sgstAmount);
+
+  const totalAmount = round2(
+    itemTotal + deliveryFee + platformFee + taxAmount - discount
+  );
+
+  return {
+    itemTotal,
+    deliveryFee,
+    platformFee,
+    cgstRate: CGST_RATE,
+    sgstRate: SGST_RATE,
+    cgstAmount,
+    sgstAmount,
+    taxAmount,
+    discount: round2(discount),
+    totalAmount,
+    pricingResponse: {
+      cartValue: itemTotal,
+      subtotal: itemTotal,
+      deliveryFee,
+      platformFee,
+      tax: {
+        cgstRate: CGST_RATE,
+        sgstRate: SGST_RATE,
+        cgst: cgstAmount,
+        sgst: sgstAmount,
+        total: taxAmount,
+      },
+      taxAmount,
+      discount: round2(discount),
+      totalAmount,
+      grandTotal: totalAmount,
+    },
+  };
 };
 
 const safeNotify = async payload => {
@@ -63,7 +125,10 @@ const isRestaurantAvailableNow = restaurant => {
   }
 
   if (restaurant.isAcceptingOrders === false) {
-    return { allowed: false, message: "Store is not accepting orders right now" };
+    return {
+      allowed: false,
+      message: "Store is not accepting orders right now",
+    };
   }
 
   if (restaurant.busyUntil && new Date(restaurant.busyUntil) > now) {
@@ -97,9 +162,11 @@ const isRestaurantAvailableNow = restaurant => {
     let isInsideTime = false;
 
     if (openMinutes <= closeMinutes) {
-      isInsideTime = currentMinutes >= openMinutes && currentMinutes <= closeMinutes;
+      isInsideTime =
+        currentMinutes >= openMinutes && currentMinutes <= closeMinutes;
     } else {
-      isInsideTime = currentMinutes >= openMinutes || currentMinutes <= closeMinutes;
+      isInsideTime =
+        currentMinutes >= openMinutes || currentMinutes <= closeMinutes;
     }
 
     if (!isInsideTime) {
@@ -115,12 +182,7 @@ const isRestaurantAvailableNow = restaurant => {
 
 export const createOrder = async (req, res) => {
   try {
-    const {
-      addressId,
-      paymentMethod = "COD",
-      customerNote,
-      couponCode,
-    } = req.body;
+    const { addressId, paymentMethod = "COD", customerNote, couponCode } = req.body;
 
     if (!addressId) {
       return res.status(400).json({
@@ -197,13 +259,11 @@ export const createOrder = async (req, res) => {
       });
     }
 
-    const itemTotal = cartItems.reduce(
-      (sum, item) => sum + toNumber(item.totalPrice),
-      0
+    const itemTotal = round2(
+      cartItems.reduce((sum, item) => sum + toNumber(item.totalPrice), 0)
     );
 
-    const deliveryFee = toNumber(restaurant.deliveryFee);
-    const taxAmount = 0;
+    const deliveryFeeForCoupon = round2(restaurant.deliveryFee);
 
     let discount = 0;
     let couponId = null;
@@ -291,15 +351,27 @@ export const createOrder = async (req, res) => {
         });
       }
 
-      discount = calculateCouponDiscount({ coupon, itemTotal, deliveryFee });
+      discount = calculateCouponDiscount({
+        coupon,
+        itemTotal,
+        deliveryFee: deliveryFeeForCoupon,
+      });
+
       couponId = coupon.id;
     }
 
-    const finalAmount = itemTotal + deliveryFee + taxAmount - discount;
+    const pricing = calculateOrderPricing({
+      cartItems,
+      restaurant,
+      discount,
+    });
 
     const defaultPrepTime =
       Number(restaurant.defaultPrepTime) ||
-      Math.max(...cartItems.map(item => Number(item.menuItem?.prepTimeMin || 20)), 20);
+      Math.max(
+        ...cartItems.map(item => Number(item.menuItem?.prepTimeMin || 20)),
+        20
+      );
 
     const order = await prisma.$transaction(async tx => {
       const newOrder = await tx.order.create({
@@ -309,12 +381,12 @@ export const createOrder = async (req, res) => {
           vendorId: restaurant.vendorId,
           addressId,
 
-          itemTotal,
-          deliveryFee,
-          discount,
+          itemTotal: pricing.itemTotal,
+          deliveryFee: pricing.deliveryFee,
+          discount: pricing.discount,
           couponId,
-          taxAmount,
-          totalAmount: finalAmount,
+          taxAmount: pricing.taxAmount,
+          totalAmount: pricing.totalAmount,
 
           paymentMethod,
           paymentStatus: "PENDING",
@@ -375,7 +447,7 @@ export const createOrder = async (req, res) => {
             couponId,
             userId: req.user.id,
             orderId: newOrder.id,
-            discountAmount: discount,
+            discountAmount: pricing.discount,
           },
         });
 
@@ -435,6 +507,7 @@ export const createOrder = async (req, res) => {
       message: "Order placed successfully",
       data: order,
       order,
+      pricing: pricing.pricingResponse,
     });
   } catch (error) {
     console.error("Create Order Error:", error);
@@ -653,8 +726,8 @@ export const updateOrderStatus = async (req, res) => {
         if (!existingVendorSettlement && order.vendorId) {
           const grossAmount = toNumber(order.totalAmount);
           const commissionPercent = toNumber(order.restaurant?.commission || 10);
-          const commissionAmount = (grossAmount * commissionPercent) / 100;
-          const netAmount = grossAmount - commissionAmount;
+          const commissionAmount = round2((grossAmount * commissionPercent) / 100);
+          const netAmount = round2(grossAmount - commissionAmount);
 
           await tx.vendorSettlement.create({
             data: {

@@ -2,10 +2,16 @@ import prisma from "../prisma.js";
 
 const toNumber = value => Number(value || 0);
 
+const round2 = value => Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
+
 const normalizeIds = value => {
   if (!Array.isArray(value)) return [];
   return value.filter(Boolean);
 };
+
+const PLATFORM_FEE = round2(process.env.KARTO_PLATFORM_FEE || 5);
+const CGST_RATE = round2(process.env.KARTO_CGST_RATE || 2.5);
+const SGST_RATE = round2(process.env.KARTO_SGST_RATE || 2.5);
 
 const getCartSummary = cartItems => {
   const itemCount = cartItems.reduce(
@@ -20,8 +26,48 @@ const getCartSummary = cartItems => {
 
   return {
     itemCount,
+    totalAmount: round2(totalAmount),
+    total: round2(totalAmount),
+  };
+};
+
+export const calculateCartPricingFromItems = cartItems => {
+  const cartValue = round2(
+    cartItems.reduce((sum, item) => sum + toNumber(item.totalPrice), 0)
+  );
+
+  const restaurant = cartItems[0]?.restaurant || null;
+
+  const deliveryFee = cartItems.length
+    ? round2(restaurant?.deliveryFee || 0)
+    : 0;
+
+  const platformFee = cartItems.length ? PLATFORM_FEE : 0;
+
+  const cgstRate = CGST_RATE;
+  const sgstRate = SGST_RATE;
+
+  const cgst = round2((cartValue * cgstRate) / 100);
+  const sgst = round2((cartValue * sgstRate) / 100);
+  const taxAmount = round2(cgst + sgst);
+
+  const totalAmount = round2(cartValue + deliveryFee + platformFee + taxAmount);
+
+  return {
+    cartValue,
+    subtotal: cartValue,
+    deliveryFee,
+    platformFee,
+    tax: {
+      cgstRate,
+      sgstRate,
+      cgst,
+      sgst,
+      total: taxAmount,
+    },
+    taxAmount,
     totalAmount,
-    total: totalAmount,
+    grandTotal: totalAmount,
   };
 };
 
@@ -65,8 +111,8 @@ const calculateItemPricing = async ({
     0
   );
 
-  const unitPrice = basePrice + customizationTotal + addonTotal;
-  const totalPrice = unitPrice * safeQuantity;
+  const unitPrice = round2(basePrice + customizationTotal + addonTotal);
+  const totalPrice = round2(unitPrice * safeQuantity);
 
   return {
     safeQuantity,
@@ -75,12 +121,12 @@ const calculateItemPricing = async ({
     customizationJson: customizations.map(item => ({
       id: item.id,
       title: item.title,
-      price: toNumber(item.price),
+      price: round2(item.price),
     })),
     addonJson: addons.map(item => ({
       id: item.id,
       title: item.title,
-      price: toNumber(item.price),
+      price: round2(item.price),
       imageUrl: item.imageUrl || null,
     })),
   };
@@ -98,15 +144,50 @@ export const getCart = async (req, res) => {
     });
 
     const summary = getCartSummary(cartItems);
+    const pricing = calculateCartPricingFromItems(cartItems);
 
     return res.json({
       success: true,
       data: cartItems,
       cartItems,
+      pricing,
       ...summary,
     });
   } catch (error) {
     console.error("Get Cart Error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+      error: error.message,
+    });
+  }
+};
+
+export const getCartPricing = async (req, res) => {
+  try {
+    const cartItems = await prisma.cartItem.findMany({
+      where: { userId: req.user.id },
+      include: {
+        menuItem: true,
+        restaurant: true,
+      },
+      orderBy: { createdAt: "asc" },
+    });
+
+    const pricing = calculateCartPricingFromItems(cartItems);
+    const summary = getCartSummary(cartItems);
+
+    return res.json({
+      success: true,
+      data: {
+        pricing,
+        itemCount: summary.itemCount,
+      },
+      pricing,
+      itemCount: summary.itemCount,
+    });
+  } catch (error) {
+    console.error("Get Cart Pricing Error:", error);
     return res.status(500).json({
       success: false,
       message: "Something went wrong",
@@ -230,7 +311,7 @@ export const addToCart = async (req, res) => {
         data: {
           quantity: newQuantity,
           price: pricing.unitPrice,
-          totalPrice: pricing.unitPrice * newQuantity,
+          totalPrice: round2(pricing.unitPrice * newQuantity),
           note: note ?? existingItem.note,
           customizationJson: pricing.customizationJson,
           addonJson: pricing.addonJson,

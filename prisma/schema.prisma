@@ -172,7 +172,16 @@ model User {
 
   vendorSettlements VendorSettlement[] @relation("VendorSettlementUser")
   riderSettlements  RiderSettlement[]  @relation("RiderSettlementUser")
+isOnline Boolean @default(false)
+lastSeen  DateTime?
 
+aadhaarNumber   String?
+drivingLicense  String?
+aadhaarImageUrl String?
+licenseImageUrl String?
+kycStatus       String  @default("PENDING")
+
+riderIncentives RiderIncentive[]
   @@index([role])
   @@index([email])
   @@index([phone])
@@ -650,7 +659,11 @@ model Order {
 
   vendorSettlements VendorSettlement[]
   riderSettlements  RiderSettlement[]
-
+platformFee Decimal @default(0) @db.Decimal(10, 2)
+cgstAmount  Decimal @default(0) @db.Decimal(10, 2)
+sgstAmount  Decimal @default(0) @db.Decimal(10, 2)
+cgstRate    Decimal @default(2.5) @db.Decimal(5, 2)
+sgstRate    Decimal @default(2.5) @db.Decimal(5, 2)
   @@index([userId])
   @@index([restaurantId])
   @@index([vendorId])
@@ -1162,4 +1175,31 @@ model RiderSettlement {
   @@index([orderId])
   @@index([status])
   @@index([createdAt])
+}
+
+model RiderIncentive {
+  id String @id @default(uuid())
+
+  riderId String
+
+  title  String
+  amount Decimal @db.Decimal(10, 2)
+
+  targetOrders    Int
+  completedOrders Int @default(0)
+
+  isCompleted Boolean @default(false)
+
+  startDate DateTime
+  endDate   DateTime
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  rider User @relation(fields: [riderId], references: [id], onDelete: Cascade)
+
+  @@index([riderId])
+  @@index([isCompleted])
+  @@index([startDate])
+  @@index([endDate])
 }

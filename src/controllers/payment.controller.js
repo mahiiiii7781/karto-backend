@@ -7,13 +7,19 @@ const razorpay = new Razorpay({
   key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
 
-/* =========================
-   CREATE PAYMENT ORDER
-========================= */
+const toNumber = value => Number(value || 0);
+
 export const createPaymentOrder = async (req, res) => {
   try {
     const userId = req.user.id;
     const { orderId } = req.body;
+
+    if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
+      return res.status(500).json({
+        success: false,
+        message: "Payment gateway is not configured",
+      });
+    }
 
     if (!orderId) {
       return res.status(400).json({
@@ -33,15 +39,38 @@ export const createPaymentOrder = async (req, res) => {
       });
     }
 
+    if (order.paymentMethod !== "ONLINE") {
+      return res.status(400).json({
+        success: false,
+        message: "Online payment is not enabled for this order",
+      });
+    }
+
     if (order.paymentStatus === "PAID") {
       return res.status(400).json({
         success: false,
-        message: "Order already paid",
+        message: "Order is already paid",
+      });
+    }
+
+    if (order.status === "CANCELLED") {
+      return res.status(400).json({
+        success: false,
+        message: "Payment cannot be created for a cancelled order",
+      });
+    }
+
+    const amountInPaise = Math.round(toNumber(order.totalAmount) * 100);
+
+    if (!amountInPaise || amountInPaise < 100) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid order amount",
       });
     }
 
     const razorpayOrder = await razorpay.orders.create({
-      amount: Math.round(Number(order.totalAmount) * 100),
+      amount: amountInPaise,
       currency: "INR",
       receipt: order.orderNumber,
       notes: {
@@ -52,10 +81,13 @@ export const createPaymentOrder = async (req, res) => {
 
     return res.json({
       success: true,
+      message: "Payment order created successfully",
       key: process.env.RAZORPAY_KEY_ID,
       razorpayOrderId: razorpayOrder.id,
       amount: razorpayOrder.amount,
+      currency: razorpayOrder.currency,
       kartoOrderId: order.id,
+      orderNumber: order.orderNumber,
     });
   } catch (error) {
     console.error("Create Payment Error:", error);
@@ -66,9 +98,6 @@ export const createPaymentOrder = async (req, res) => {
   }
 };
 
-/* =========================
-   VERIFY PAYMENT
-========================= */
 export const verifyPayment = async (req, res) => {
   try {
     const userId = req.user.id;
@@ -92,9 +121,6 @@ export const verifyPayment = async (req, res) => {
       });
     }
 
-    /* =========================
-       GET ORDER FIRST (SECURITY)
-    ========================= */
     const existingOrder = await prisma.order.findUnique({
       where: { id: kartoOrderId },
     });
@@ -116,13 +142,17 @@ export const verifyPayment = async (req, res) => {
     if (existingOrder.paymentStatus === "PAID") {
       return res.status(400).json({
         success: false,
-        message: "Order already paid",
+        message: "Order is already paid",
       });
     }
 
-    /* =========================
-       SIGNATURE VERIFY
-    ========================= */
+    if (existingOrder.status === "CANCELLED") {
+      return res.status(400).json({
+        success: false,
+        message: "Payment cannot be verified for a cancelled order",
+      });
+    }
+
     const body = `${razorpay_order_id}|${razorpay_payment_id}`;
 
     const expectedSignature = crypto
@@ -131,15 +161,20 @@ export const verifyPayment = async (req, res) => {
       .digest("hex");
 
     if (expectedSignature !== razorpay_signature) {
+      await prisma.order.update({
+        where: { id: kartoOrderId },
+        data: {
+          paymentMethod: "ONLINE",
+          paymentStatus: "FAILED",
+        },
+      });
+
       return res.status(400).json({
         success: false,
         message: "Invalid payment signature",
       });
     }
 
-    /* =========================
-       UPDATE ORDER
-    ========================= */
     const updatedOrder = await prisma.order.update({
       where: { id: kartoOrderId },
       data: {
@@ -151,6 +186,7 @@ export const verifyPayment = async (req, res) => {
     return res.json({
       success: true,
       message: "Payment verified successfully",
+      data: updatedOrder,
       order: updatedOrder,
     });
   } catch (error) {

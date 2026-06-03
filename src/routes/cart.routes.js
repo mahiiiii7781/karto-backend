@@ -1,8 +1,10 @@
 import express from "express";
 import { protect } from "../middleware/auth.middleware.js";
+
 import {
   getCart,
   getCartTotal,
+  getCartPricing,
   addToCart,
   updateCartItem,
   removeCartItem,
@@ -11,14 +13,30 @@ import {
 
 const router = express.Router();
 
+/* =========================
+   CART
+========================= */
+
 router.get("/", protect, getCart);
+
 router.get("/total", protect, getCartTotal);
+
+/* =========================
+   CHECKOUT PRICING
+========================= */
+
+router.get("/pricing", protect, getCartPricing);
+
+/* =========================
+   CART ACTIONS
+========================= */
 
 router.post("/add", protect, addToCart);
 
 router.patch("/:id", protect, updateCartItem);
 
 router.delete("/:id", protect, removeCartItem);
+
 router.delete("/", protect, clearCart);
 
 export default router;
