@@ -1291,7 +1291,197 @@ export const getVendorEarningsGraph = async (req, res) => {
     });
   }
 };
+export const getAvailableRidersForVendor = async (req, res) => {
+  try {
+    const riders = await prisma.user.findMany({
+      where: {
+        role: "RIDER",
+      },
+      select: {
+        id: true,
+        fullName: true,
+        phone: true,
+        email: true,
+        avatarUrl: true,
+        createdAt: true,
+      },
+      orderBy: {
+        createdAt: "desc",
+      },
+    });
 
+    const mappedRiders = riders.map(rider => ({
+      id: rider.id,
+      fullName: rider.fullName,
+      phone: rider.phone,
+      email: rider.email,
+      avatarUrl: rider.avatarUrl,
+      isAvailable: true,
+      currentStatus: "AVAILABLE",
+    }));
+
+    return res.json({
+      success: true,
+      data: mappedRiders,
+      riders: mappedRiders,
+    });
+  } catch (error) {
+    console.error("Get Available Riders Error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+      error: error.message,
+    });
+  }
+};
+
+export const assignVendorOrderRider = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { riderId } = req.body;
+
+    if (!riderId) {
+      return res.status(400).json({
+        success: false,
+        message: "Rider id is required",
+      });
+    }
+
+    const existingOrder = await prisma.order.findFirst({
+      where: {
+        id,
+        vendorId: req.user.id,
+      },
+      include: {
+        rider: {
+          select: {
+            id: true,
+            fullName: true,
+            phone: true,
+            email: true,
+          },
+        },
+      },
+    });
+
+    if (!existingOrder) {
+      return res.status(404).json({
+        success: false,
+        message: "Order not found for this vendor",
+      });
+    }
+
+    if (
+      existingOrder.status !== "READY_FOR_PICKUP" &&
+      existingOrder.status !== "ASSIGNED_TO_RIDER"
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Rider can be assigned only after order is ready",
+      });
+    }
+
+    const rider = await prisma.user.findFirst({
+      where: {
+        id: riderId,
+        role: "RIDER",
+      },
+      select: {
+        id: true,
+        fullName: true,
+        phone: true,
+        email: true,
+      },
+    });
+
+    if (!rider) {
+      return res.status(404).json({
+        success: false,
+        message: "Rider not found",
+      });
+    }
+
+    const order = await prisma.$transaction(async tx => {
+      const updated = await tx.order.update({
+        where: { id },
+        data: {
+          riderId,
+          status: "ASSIGNED_TO_RIDER",
+        },
+        include: {
+          user: {
+            select: {
+              id: true,
+              fullName: true,
+              phone: true,
+              email: true,
+            },
+          },
+          restaurant: true,
+          address: true,
+          rider: {
+            select: {
+              id: true,
+              fullName: true,
+              phone: true,
+              email: true,
+            },
+          },
+          items: {
+            include: {
+              menuItem: true,
+            },
+            orderBy: {
+              createdAt: "asc",
+            },
+          },
+          history: {
+            orderBy: {
+              createdAt: "asc",
+            },
+          },
+        },
+      });
+
+      await tx.orderStatusHistory.create({
+        data: {
+          orderId: id,
+          status: "ASSIGNED_TO_RIDER",
+          changedBy: req.user.id,
+          note: existingOrder.riderId
+            ? `Rider reassigned to ${rider.fullName || rider.phone || rider.id}`
+            : `Rider assigned to ${rider.fullName || rider.phone || rider.id}`,
+        },
+      });
+
+      return updated;
+    });
+
+    emitOrderStatus(id, "ASSIGNED_TO_RIDER", {
+      order,
+      rider,
+      assignedBy: req.user.id,
+    });
+
+    return res.json({
+      success: true,
+      message: existingOrder.riderId
+        ? "Rider reassigned successfully"
+        : "Rider assigned successfully",
+      data: order,
+      order,
+    });
+  } catch (error) {
+    console.error("Assign Vendor Order Rider Error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+      error: error.message,
+    });
+  }
+};
 export default {
   getCategories,
   getVendors,
@@ -1301,7 +1491,8 @@ export default {
   getVendorOrders,
   updateVendorOrderStatus,
   updatePreparationTime,
-
+getAvailableRidersForVendor,
+assignVendorOrderRider,
   getVendorMenu,
   createVendorMenuItem,
   updateVendorMenuItem,

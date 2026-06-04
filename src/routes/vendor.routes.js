@@ -12,6 +12,9 @@ import {
   updateVendorOrderStatus,
   updatePreparationTime,
 
+  getAvailableRidersForVendor,
+  assignVendorOrderRider,
+
   getVendorMenu,
   createVendorMenuItem,
   updateVendorMenuItem,
@@ -72,6 +75,24 @@ router.patch(
   protect,
   allowRoles("VENDOR", "ADMIN"),
   updatePreparationTime
+);
+
+/* =========================
+   VENDOR RIDER APIs
+========================= */
+
+router.get(
+  "/riders/available",
+  protect,
+  allowRoles("VENDOR", "ADMIN"),
+  getAvailableRidersForVendor
+);
+
+router.patch(
+  "/orders/:id/assign-rider",
+  protect,
+  allowRoles("VENDOR", "ADMIN"),
+  assignVendorOrderRider
 );
 
 /* =========================
