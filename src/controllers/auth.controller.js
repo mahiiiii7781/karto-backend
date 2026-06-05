@@ -26,10 +26,11 @@ const generateOtp = () =>
 
 const mailTransporter = nodemailer.createTransport({
   host: env.SMTP_HOST || process.env.SMTP_HOST || "smtp.gmail.com",
-  port: Number(env.SMTP_PORT || process.env.SMTP_PORT || 465),
-  secure: true,
-  pool: false,
+  port: Number(env.SMTP_PORT || process.env.SMTP_PORT || 587),
+  secure: false,
+  requireTLS: true,
   family: 4,
+  pool: false,
   connectionTimeout: 30000,
   greetingTimeout: 30000,
   socketTimeout: 30000,
