@@ -59,9 +59,9 @@ const sendEmailOtp = async (email, code) => {
   try {
     console.log("BEFORE SMTP VERIFY");
 
-    await mailTransporter.verify();
+    // await mailTransporter.verify();
 
-    console.log("AFTER SMTP VERIFY");
+    // console.log("AFTER SMTP VERIFY");
 
     const info = await mailTransporter.sendMail({
       from: `"Karto Security" <${env.SMTP_USER || process.env.SMTP_USER}>`,
