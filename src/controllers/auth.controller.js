@@ -25,15 +25,19 @@ const generateOtp = () =>
   Math.floor(100000 + Math.random() * 900000).toString();
 
 const mailTransporter = nodemailer.createTransport({
-  host: env.SMTP_HOST || process.env.SMTP_HOST || "smtp.gmail.com",
-  port: Number(env.SMTP_PORT || process.env.SMTP_PORT || 587),
+  host: "74.125.130.109",
+  port: 587,
   secure: false,
   requireTLS: true,
   family: 4,
-  pool: false,
-  connectionTimeout: 30000,
-  greetingTimeout: 30000,
-  socketTimeout: 30000,
+  name: "gmail.com",
+  tls: {
+    servername: "smtp.gmail.com",
+    rejectUnauthorized: true,
+  },
+  connectionTimeout: 60000,
+  greetingTimeout: 60000,
+  socketTimeout: 60000,
   auth: {
     user: env.SMTP_USER || process.env.SMTP_USER,
     pass: env.SMTP_PASS || process.env.SMTP_PASS,
