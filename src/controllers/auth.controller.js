@@ -57,7 +57,7 @@ console.log("SMTP_HOST:", process.env.SMTP_HOST);
 console.log("SMTP_PORT:", process.env.SMTP_PORT);
 const sendEmailOtp = async (email, code) => {
   try {
-    console.log("BEFORE SMTP VERIFY");
+   console.log("BEFORE SEND MAIL");
 
     // await mailTransporter.verify();
 
