@@ -9,7 +9,10 @@ import {
 import nodemailer from "nodemailer";
 import twilio from "twilio";
 import dns from "dns";
+import { Resend } from "resend";
+
 dns.setDefaultResultOrder("ipv4first");
+
 const safeUser = (user) => ({
   id: user.id,
   fullName: user.fullName,
@@ -24,6 +27,12 @@ const safeUser = (user) => ({
 const generateOtp = () =>
   Math.floor(100000 + Math.random() * 900000).toString();
 
+/* =========================================================
+   OLD GMAIL SMTP SETUP - COMMENTED, KEPT FOR FALLBACK ONLY
+   Railway par Gmail SMTP timeout de raha tha, isliye Resend active hai.
+   ========================================================= */
+
+/*
 const mailTransporter = nodemailer.createTransport({
   host: "74.125.130.109",
   port: 587,
@@ -43,6 +52,16 @@ const mailTransporter = nodemailer.createTransport({
     pass: env.SMTP_PASS || process.env.SMTP_PASS,
   },
 });
+*/
+
+/* =========================================================
+   RESEND EMAIL SETUP - ACTIVE
+   Required Railway env:
+   RESEND_API_KEY=re_xxxxx
+   EMAIL_FROM=onboarding@resend.dev
+   ========================================================= */
+
+const resend = new Resend(env.RESEND_API_KEY || process.env.RESEND_API_KEY);
 
 const twilioClient =
   (env.TWILIO_ACCOUNT_SID || process.env.TWILIO_ACCOUNT_SID) &&
@@ -52,12 +71,21 @@ const twilioClient =
         env.TWILIO_AUTH_TOKEN || process.env.TWILIO_AUTH_TOKEN
       )
     : null;
+
 console.log("SMTP_USER:", process.env.SMTP_USER);
 console.log("SMTP_HOST:", process.env.SMTP_HOST);
 console.log("SMTP_PORT:", process.env.SMTP_PORT);
+console.log("RESEND_API_KEY EXISTS:", Boolean(process.env.RESEND_API_KEY));
+console.log("EMAIL_FROM:", process.env.EMAIL_FROM);
+
+/* =========================================================
+   OLD GMAIL OTP SENDER - COMMENTED, KEPT FOR FALLBACK ONLY
+   ========================================================= */
+
+/*
 const sendEmailOtp = async (email, code) => {
   try {
-   console.log("BEFORE SEND MAIL");
+    console.log("BEFORE SEND MAIL");
 
     // await mailTransporter.verify();
 
@@ -106,6 +134,79 @@ const sendEmailOtp = async (email, code) => {
 
     console.log("MAIL SENT SUCCESSFULLY");
     console.log("MESSAGE ID:", info.messageId);
+
+    return true;
+  } catch (error) {
+    console.error("EMAIL SEND ERROR:", error);
+    throw error;
+  }
+};
+*/
+
+/* =========================================================
+   ACTIVE RESEND OTP SENDER
+   Same Karto theme: black + green + yellow
+   ========================================================= */
+
+const sendEmailOtp = async (email, code) => {
+  try {
+    console.log("BEFORE RESEND SEND MAIL");
+
+    if (!(env.RESEND_API_KEY || process.env.RESEND_API_KEY)) {
+      throw new Error("RESEND_API_KEY is missing");
+    }
+
+    const { data, error } = await resend.emails.send({
+      from:
+        env.EMAIL_FROM ||
+        process.env.EMAIL_FROM ||
+        "onboarding@resend.dev",
+      to: [email],
+      subject: "Your Karto Login OTP",
+      html: `
+        <div style="margin:0;padding:0;background:#050807;font-family:Arial,sans-serif;color:#ffffff;">
+          <div style="max-width:560px;margin:0 auto;padding:28px;">
+            <div style="background:#101510;border:1px solid #2C382E;border-radius:24px;padding:28px;">
+              <div style="font-size:34px;font-weight:900;color:#22C55E;margin-bottom:8px;">
+                Karto
+              </div>
+
+              <h2 style="margin:0;color:#ffffff;font-size:24px;">
+                Verify your login
+              </h2>
+
+              <p style="color:#A7B0AA;font-size:15px;line-height:22px;">
+                Use the OTP below to continue securely. This code is valid for
+                <b style="color:#FACC15;">5 minutes</b>.
+              </p>
+
+              <div style="margin:26px 0;padding:20px;border-radius:18px;background:#0B0F0A;border:1px solid #FACC15;text-align:center;">
+                <div style="font-size:38px;letter-spacing:8px;font-weight:900;color:#FACC15;">
+                  ${code}
+                </div>
+              </div>
+
+              <p style="color:#A7B0AA;font-size:13px;line-height:20px;">
+                If you did not request this OTP, you can safely ignore this email.
+                Your Karto account remains protected.
+              </p>
+
+              <div style="margin-top:22px;padding-top:16px;border-top:1px solid #2C382E;color:#22C55E;font-size:13px;">
+                Fast delivery. Secure login. Premium Karto experience.
+              </div>
+            </div>
+          </div>
+        </div>
+      `,
+    });
+
+    if (error) {
+      console.error("RESEND ERROR:", error);
+      throw new Error(error.message || "Resend email send failed");
+    }
+
+    console.log("MAIL SENT SUCCESSFULLY VIA RESEND");
+    console.log("RESEND MESSAGE:", data);
 
     return true;
   } catch (error) {
@@ -357,17 +458,16 @@ export const sendOtp = async (req, res) => {
       success: true,
       message: "OTP sent successfully",
     });
-  } 
-  catch (error) {
-  console.error("Send OTP Error FULL:", error);
+  } catch (error) {
+    console.error("Send OTP Error FULL:", error);
 
-  return res.status(500).json({
-    success: false,
-    message: "Something went wrong while sending OTP",
-    error: error.message,
-    code: error.code || null,
-  });
-}
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong while sending OTP",
+      error: error.message,
+      code: error.code || null,
+    });
+  }
 };
 
 export const verifyOtp = async (req, res) => {
