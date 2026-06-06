@@ -2597,3 +2597,75 @@ export const getMonthlyBilling = async (req, res) => {
     return res.status(500).json({ success: false, message: error.message });
   }
 };
+export const deleteCity = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const city = await prisma.city.findUnique({
+      where: { id },
+    });
+
+    if (!city) {
+      return res.status(404).json({
+        success: false,
+        message: "City not found",
+      });
+    }
+
+    await prisma.city.delete({
+      where: { id },
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "City deleted successfully",
+    });
+  } catch (error) {
+    console.error("Delete City Error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong while deleting city",
+      error: error.message,
+    });
+  }
+};
+export const updateCity = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, stateId, isActive } = req.body;
+
+    const city = await prisma.city.findUnique({
+      where: { id },
+    });
+
+    if (!city) {
+      return res.status(404).json({
+        success: false,
+        message: "City not found",
+      });
+    }
+
+    const updatedCity = await prisma.city.update({
+      where: { id },
+      data: {
+        ...(name !== undefined && { name }),
+        ...(stateId !== undefined && { stateId }),
+        ...(isActive !== undefined && { isActive }),
+      },
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "City updated successfully",
+      city: updatedCity,
+    });
+  } catch (error) {
+    console.error("Update City Error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong while updating city",
+      error: error.message,
+    });
+  }
+};
