@@ -157,10 +157,7 @@ const sendEmailOtp = async (email, code) => {
     }
 
     const { data, error } = await resend.emails.send({
-      from:
-        env.EMAIL_FROM ||
-        process.env.EMAIL_FROM ||
-        "onboarding@resend.dev",
+     from: `Karto Support Team <${env.EMAIL_FROM || process.env.EMAIL_FROM || "security@karto.online"}>`,
       to: [email],
       subject: "Your Karto Login OTP",
       html: `

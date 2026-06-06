@@ -7,14 +7,23 @@ const allowedRoles = ["CUSTOMER", "VENDOR", "RIDER", "ADMIN"];
 
 const moneyNumber = (value) => Number(value || 0);
 
+const cleanString = (value) =>
+  value === undefined || value === null ? undefined : String(value).trim();
+
+const cleanEmail = (value) => cleanString(value)?.toLowerCase();
+
 const fileUrl = async (req, folder = "misc") => {
   if (!req.file) return undefined;
   return await uploadToCloudinary(req.file, folder);
 };
 
-const boolValue = (value) => {
+const boolValue = (value, fallback = false) => {
+  if (value === undefined || value === null || value === "") return fallback;
   if (typeof value === "boolean") return value;
-  return String(value) === "true";
+  if (typeof value === "number") return value === 1;
+
+  const normalized = String(value).trim().toLowerCase();
+  return ["true", "1", "yes", "y", "active", "on"].includes(normalized);
 };
 
 const parseJsonArray = (value) => {
@@ -266,7 +275,7 @@ export const toggleUserActiveStatus = async (req, res) => {
 
     const user = await prisma.user.update({
       where: { id },
-      data: { isActive: Boolean(isActive) },
+      data: { isActive: boolValue(isActive) },
       select: {
         id: true,
         fullName: true,
@@ -285,6 +294,57 @@ export const toggleUserActiveStatus = async (req, res) => {
     });
   } catch (error) {
     console.error("Toggle User Status Error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+
+export const deleteUserByAdmin = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (req.user?.id === id) {
+      return res.status(400).json({
+        success: false,
+        message: "Admin cannot delete own account",
+      });
+    }
+
+    const user = await prisma.user.findUnique({ where: { id } });
+
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+
+    // Safe delete: if this user has orders/relations, keep history and deactivate instead.
+    try {
+      await prisma.user.delete({ where: { id } });
+      return res.json({ success: true, message: "User deleted successfully" });
+    } catch (deleteError) {
+      if (deleteError?.code !== "P2003") throw deleteError;
+
+      const updated = await prisma.user.update({
+        where: { id },
+        data: { isActive: false },
+        select: {
+          id: true,
+          fullName: true,
+          email: true,
+          phone: true,
+          role: true,
+          isActive: true,
+        },
+      });
+
+      return res.json({
+        success: true,
+        message: "User has linked records, so it was deactivated safely",
+        user: updated,
+        data: updated,
+      });
+    }
+  } catch (error) {
+    console.error("Delete User Error:", error);
     return res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -596,7 +656,7 @@ export const toggleRestaurantStatus = async (req, res) => {
 
     const restaurant = await prisma.restaurant.update({
       where: { id },
-      data: { isOpen: Boolean(isActive) },
+      data: { isOpen: boolValue(isActive) },
     });
 
     return res.json({
@@ -610,6 +670,159 @@ export const toggleRestaurantStatus = async (req, res) => {
     return res.status(500).json({ success: false, message: error.message });
   }
 };
+
+export const updateVendorByAdmin = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      cityId,
+      categoryId,
+      name,
+      ownerName,
+      ownerMobileNo,
+      phone,
+      email,
+      address,
+      type,
+      commission,
+      imageUrl,
+      isOpen,
+      isActive,
+      password,
+    } = req.body;
+
+    if (cityId) {
+      const city = await prisma.city.findUnique({ where: { id: cityId } });
+      if (!city) return res.status(404).json({ success: false, message: "City not found" });
+    }
+
+    if (categoryId) {
+      const category = await prisma.category.findUnique({ where: { id: categoryId } });
+      if (!category) return res.status(404).json({ success: false, message: "Category not found" });
+    }
+
+    const restaurant = await prisma.restaurant.findUnique({
+      where: { id },
+      include: { vendor: true },
+    });
+
+    if (!restaurant) {
+      return res.status(404).json({ success: false, message: "Vendor not found" });
+    }
+
+    const finalImageUrl = await fileUrl(req, "vendors");
+    const userUpdateData = {
+      ...(ownerName !== undefined && { fullName: cleanString(ownerName) }),
+      ...(email !== undefined && { email: cleanEmail(email) }),
+      ...(ownerMobileNo !== undefined && { phone: cleanString(ownerMobileNo) }),
+      ...(finalImageUrl && { avatarUrl: finalImageUrl }),
+      ...(!finalImageUrl && imageUrl !== undefined && { avatarUrl: imageUrl || null }),
+      ...(password ? { password: await bcrypt.hash(password, 10) } : {}),
+      ...(isActive !== undefined && { isActive: boolValue(isActive) }),
+    };
+
+    const restaurantUpdateData = {
+      ...(cityId !== undefined && { cityId }),
+      ...(categoryId !== undefined && { categoryId: categoryId || null }),
+      ...(name !== undefined && { name: cleanString(name) }),
+      ...(ownerName !== undefined && { ownerName: cleanString(ownerName) }),
+      ...(ownerMobileNo !== undefined && { ownerMobileNo: cleanString(ownerMobileNo) }),
+      ...(phone !== undefined && { phone: cleanString(phone) }),
+      ...(email !== undefined && { email: cleanEmail(email) }),
+      ...(address !== undefined && { address: cleanString(address) }),
+      ...(type !== undefined && { type }),
+      ...(commission !== undefined && { commission: Number(commission || 0) }),
+      ...(isOpen !== undefined && { isOpen: boolValue(isOpen) }),
+      ...(isActive !== undefined && { isOpen: boolValue(isActive) }),
+      ...(finalImageUrl && { imageUrl: finalImageUrl }),
+      ...(!finalImageUrl && imageUrl !== undefined && { imageUrl: imageUrl || null }),
+    };
+
+    const data = await prisma.$transaction(async (tx) => {
+      if (Object.keys(userUpdateData).length && restaurant.vendorId) {
+        await tx.user.update({ where: { id: restaurant.vendorId }, data: userUpdateData });
+      }
+
+      return tx.restaurant.update({
+        where: { id },
+        data: restaurantUpdateData,
+        include: {
+          city: true,
+          category: true,
+          vendor: {
+            select: {
+              id: true,
+              fullName: true,
+              email: true,
+              phone: true,
+              role: true,
+              isActive: true,
+            },
+          },
+          orders: true,
+          menuItems: true,
+        },
+      });
+    });
+
+    return res.json({
+      success: true,
+      message: "Vendor updated successfully",
+      vendor: data,
+      data,
+    });
+  } catch (error) {
+    console.error("Update Vendor Error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const deleteVendorByAdmin = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const restaurant = await prisma.restaurant.findUnique({ where: { id } });
+    if (!restaurant) return res.status(404).json({ success: false, message: "Vendor not found" });
+
+    try {
+      await prisma.$transaction(async (tx) => {
+        await tx.restaurant.delete({ where: { id } });
+        if (restaurant.vendorId) await tx.user.delete({ where: { id: restaurant.vendorId } });
+      });
+
+      return res.json({ success: true, message: "Vendor deleted successfully" });
+    } catch (deleteError) {
+      if (deleteError?.code !== "P2003") throw deleteError;
+
+      const data = await prisma.$transaction(async (tx) => {
+        const updatedRestaurant = await tx.restaurant.update({
+          where: { id },
+          data: { isOpen: false },
+        });
+
+        if (restaurant.vendorId) {
+          await tx.user.update({
+            where: { id: restaurant.vendorId },
+            data: { isActive: false },
+          });
+        }
+
+        return updatedRestaurant;
+      });
+
+      return res.json({
+        success: true,
+        message: "Vendor has linked records, so it was deactivated safely",
+        vendor: data,
+        data,
+      });
+    }
+  } catch (error) {
+    console.error("Delete Vendor Error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 export const getVendorCategories = async (req, res) => {
   try {
     const { restaurantId } = req.query;
@@ -1017,6 +1230,118 @@ export const getAdminRiders = async (req, res) => {
     return res.json({ success: true, riders: data, data });
   } catch (error) {
     console.error("Get Riders Error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+
+export const updateRiderByAdmin = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      cityId,
+      fullName,
+      email,
+      password,
+      phone,
+      vehicleNo,
+      vehicleType,
+      address,
+      avatarUrl,
+      isActive,
+    } = req.body;
+
+    if (cityId) {
+      const city = await prisma.city.findUnique({ where: { id: cityId } });
+      if (!city) return res.status(404).json({ success: false, message: "City not found" });
+    }
+
+    const rider = await prisma.user.findFirst({ where: { id, role: "RIDER" } });
+
+    if (!rider) {
+      return res.status(404).json({ success: false, message: "Rider not found" });
+    }
+
+    const finalAvatarUrl = await fileUrl(req, "riders");
+
+    const data = await prisma.user.update({
+      where: { id },
+      data: {
+        ...(cityId !== undefined && { cityId }),
+        ...(fullName !== undefined && { fullName: cleanString(fullName) }),
+        ...(email !== undefined && { email: cleanEmail(email) }),
+        ...(phone !== undefined && { phone: cleanString(phone) }),
+        ...(password ? { password: await bcrypt.hash(password, 10) } : {}),
+        ...(vehicleNo !== undefined && { vehicleNo: cleanString(vehicleNo) }),
+        ...(vehicleType !== undefined && { vehicleType }),
+        ...(address !== undefined && { address: cleanString(address) }),
+        ...(isActive !== undefined && { isActive: boolValue(isActive) }),
+        ...(finalAvatarUrl && { avatarUrl: finalAvatarUrl }),
+        ...(!finalAvatarUrl && avatarUrl !== undefined && { avatarUrl: avatarUrl || null }),
+      },
+      select: {
+        id: true,
+        fullName: true,
+        email: true,
+        phone: true,
+        avatarUrl: true,
+        role: true,
+        isActive: true,
+        cityId: true,
+        address: true,
+        vehicleNo: true,
+        vehicleType: true,
+        createdAt: true,
+      },
+    });
+
+    return res.json({
+      success: true,
+      message: "Rider updated successfully",
+      rider: data,
+      data,
+    });
+  } catch (error) {
+    console.error("Update Rider Error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const deleteRiderByAdmin = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const rider = await prisma.user.findFirst({ where: { id, role: "RIDER" } });
+    if (!rider) return res.status(404).json({ success: false, message: "Rider not found" });
+
+    try {
+      await prisma.user.delete({ where: { id } });
+      return res.json({ success: true, message: "Rider deleted successfully" });
+    } catch (deleteError) {
+      if (deleteError?.code !== "P2003") throw deleteError;
+
+      const data = await prisma.user.update({
+        where: { id },
+        data: { isActive: false },
+        select: {
+          id: true,
+          fullName: true,
+          email: true,
+          phone: true,
+          role: true,
+          isActive: true,
+        },
+      });
+
+      return res.json({
+        success: true,
+        message: "Rider has linked orders, so it was deactivated safely",
+        rider: data,
+        data,
+      });
+    }
+  } catch (error) {
+    console.error("Delete Rider Error:", error);
     return res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -1995,6 +2320,185 @@ export const assignRiderByAdmin = async (req, res) => {
     });
   } catch (error) {
     console.error("Assign Rider Error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+
+/* =========================
+   COUPONS
+========================= */
+
+export const getCoupons = async (req, res) => {
+  try {
+    if (!prisma.coupon) {
+      return res.status(501).json({
+        success: false,
+        message: "Coupon model is missing in Prisma schema/backend",
+      });
+    }
+
+    const coupons = await prisma.coupon.findMany({
+      orderBy: { createdAt: "desc" },
+    });
+
+    return res.json({ success: true, coupons, data: coupons });
+  } catch (error) {
+    console.error("Get Coupons Error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const createCoupon = async (req, res) => {
+  try {
+    if (!prisma.coupon) {
+      return res.status(501).json({
+        success: false,
+        message: "Coupon model is missing in Prisma schema/backend",
+      });
+    }
+
+    const {
+      code,
+      title,
+      description,
+      discountType = "PERCENTAGE",
+      discountValue,
+      minOrderAmount = 0,
+      maxDiscountAmount,
+      startDate,
+      endDate,
+      usageLimit,
+      perUserLimit = 1,
+      isActive = true,
+    } = req.body;
+
+    if (!code?.trim() || discountValue === undefined) {
+      return res.status(400).json({
+        success: false,
+        message: "Coupon code and discountValue are required",
+      });
+    }
+
+    const coupon = await prisma.coupon.create({
+      data: {
+        code: code.trim().toUpperCase(),
+        ...(title !== undefined && { title: title?.trim() || code.trim().toUpperCase() }),
+        ...(description !== undefined && { description: description?.trim() || null }),
+        discountType,
+        discountValue: Number(discountValue),
+        minOrderAmount: Number(minOrderAmount || 0),
+        ...(maxDiscountAmount !== undefined && {
+          maxDiscountAmount: maxDiscountAmount ? Number(maxDiscountAmount) : null,
+        }),
+        ...(startDate && { startDate: new Date(startDate) }),
+        ...(endDate && { endDate: new Date(endDate) }),
+        ...(usageLimit !== undefined && { usageLimit: usageLimit ? Number(usageLimit) : null }),
+        ...(perUserLimit !== undefined && { perUserLimit: Number(perUserLimit || 1) }),
+        isActive: boolValue(isActive, true),
+      },
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: "Coupon created successfully",
+      coupon,
+      data: coupon,
+    });
+  } catch (error) {
+    console.error("Create Coupon Error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const updateCoupon = async (req, res) => {
+  try {
+    if (!prisma.coupon) {
+      return res.status(501).json({
+        success: false,
+        message: "Coupon model is missing in Prisma schema/backend",
+      });
+    }
+
+    const { id } = req.params;
+    const {
+      code,
+      title,
+      description,
+      discountType,
+      discountValue,
+      minOrderAmount,
+      maxDiscountAmount,
+      startDate,
+      endDate,
+      usageLimit,
+      perUserLimit,
+      isActive,
+    } = req.body;
+
+    const coupon = await prisma.coupon.update({
+      where: { id },
+      data: {
+        ...(code !== undefined && { code: code.trim().toUpperCase() }),
+        ...(title !== undefined && { title: title?.trim() || null }),
+        ...(description !== undefined && { description: description?.trim() || null }),
+        ...(discountType !== undefined && { discountType }),
+        ...(discountValue !== undefined && { discountValue: Number(discountValue) }),
+        ...(minOrderAmount !== undefined && { minOrderAmount: Number(minOrderAmount || 0) }),
+        ...(maxDiscountAmount !== undefined && {
+          maxDiscountAmount: maxDiscountAmount ? Number(maxDiscountAmount) : null,
+        }),
+        ...(startDate !== undefined && { startDate: startDate ? new Date(startDate) : null }),
+        ...(endDate !== undefined && { endDate: endDate ? new Date(endDate) : null }),
+        ...(usageLimit !== undefined && { usageLimit: usageLimit ? Number(usageLimit) : null }),
+        ...(perUserLimit !== undefined && { perUserLimit: Number(perUserLimit || 1) }),
+        ...(isActive !== undefined && { isActive: boolValue(isActive) }),
+      },
+    });
+
+    return res.json({
+      success: true,
+      message: "Coupon updated successfully",
+      coupon,
+      data: coupon,
+    });
+  } catch (error) {
+    console.error("Update Coupon Error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const deleteCoupon = async (req, res) => {
+  try {
+    if (!prisma.coupon) {
+      return res.status(501).json({
+        success: false,
+        message: "Coupon model is missing in Prisma schema/backend",
+      });
+    }
+
+    const { id } = req.params;
+
+    try {
+      await prisma.coupon.delete({ where: { id } });
+      return res.json({ success: true, message: "Coupon deleted successfully" });
+    } catch (deleteError) {
+      if (deleteError?.code !== "P2003") throw deleteError;
+
+      const coupon = await prisma.coupon.update({
+        where: { id },
+        data: { isActive: false },
+      });
+
+      return res.json({
+        success: true,
+        message: "Coupon has linked orders, so it was deactivated safely",
+        coupon,
+        data: coupon,
+      });
+    }
+  } catch (error) {
+    console.error("Delete Coupon Error:", error);
     return res.status(500).json({ success: false, message: error.message });
   }
 };

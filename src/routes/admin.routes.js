@@ -9,14 +9,19 @@ import {
   createRoleUser,
   updateUserRole,
   toggleUserActiveStatus,
+  deleteUserByAdmin,
 
   createCity,
   getCities,
+  updateCity,
+  deleteCity,
 
   createVendorByAdmin,
   getAdminVendors,
+  updateVendorByAdmin,
   updateVendorCommission,
   toggleRestaurantStatus,
+  deleteVendorByAdmin,
 
   getVendorCategories,
   createVendorCategory,
@@ -30,6 +35,8 @@ import {
 
   createRiderByAdmin,
   getAdminRiders,
+  updateRiderByAdmin,
+  deleteRiderByAdmin,
 
   getCategories,
   createCategory,
@@ -61,6 +68,11 @@ import {
 
   getRiderBilling,
   getMonthlyBilling,
+
+  getCoupons,
+  createCoupon,
+  updateCoupon,
+  deleteCoupon,
 } from "../controllers/admin.controller.js";
 
 const router = express.Router();
@@ -69,111 +81,91 @@ router.use(protect, allowRoles("ADMIN"));
 
 router.get("/dashboard", getAdminDashboard);
 
+/* USERS */
 router.get("/users", getAllUsers);
 router.post("/users/create-role-user", upload.single("image"), createRoleUser);
 router.patch("/users/:id/role", updateUserRole);
 router.patch("/users/:id/status", toggleUserActiveStatus);
+router.delete("/users/:id", deleteUserByAdmin);
 
-router.post("/cities", createCity);
+/* CITIES */
 router.get("/cities", getCities);
+router.post("/cities", createCity);
+router.patch("/cities/:id", updateCity);
+router.delete("/cities/:id", deleteCity);
 
-/**
- * Business Categories:
- * Restaurant, Sweets, Grocery, Medical, Fruits, Vegetables
- */
+/* BUSINESS CATEGORIES */
 router.get("/categories", getCategories);
 router.post("/categories", upload.single("image"), createCategory);
 router.patch("/categories/:id", upload.single("image"), updateCategory);
 router.delete("/categories/:id", deleteCategory);
 
+/* BUSINESS SUBCATEGORIES */
 router.get("/subcategories", getSubCategories);
 router.post("/subcategories", upload.single("image"), createSubCategory);
 router.patch("/subcategories/:id", upload.single("image"), updateSubCategory);
 router.delete("/subcategories/:id", deleteSubCategory);
 
-/**
- * Vendors
- */
-router.post("/vendors", upload.single("image"), createVendorByAdmin);
+/* VENDORS */
 router.get("/vendors", getAdminVendors);
+router.post("/vendors", upload.single("image"), createVendorByAdmin);
+router.patch("/vendors/:id", upload.single("image"), updateVendorByAdmin);
 router.patch("/vendors/:id/commission", updateVendorCommission);
+router.patch("/vendors/:id/status", toggleRestaurantStatus);
+router.delete("/vendors/:id", deleteVendorByAdmin);
+
+/* BACKWARD-COMPATIBLE RESTAURANT STATUS ROUTE */
 router.patch("/restaurants/:id/status", toggleRestaurantStatus);
 
-/**
- * Vendor Internal Categories:
- * Vendor -> Category -> SubCategory -> Item
- */
+/* VENDOR INTERNAL CATEGORIES */
 router.get("/vendor-categories", getVendorCategories);
 router.post("/vendor-categories", upload.single("image"), createVendorCategory);
 router.patch("/vendor-categories/:id", upload.single("image"), updateVendorCategory);
 router.delete("/vendor-categories/:id", deleteVendorCategory);
 
+/* VENDOR INTERNAL SUBCATEGORIES */
 router.get("/vendor-subcategories", getVendorSubCategories);
 router.post("/vendor-subcategories", upload.single("image"), createVendorSubCategory);
 router.patch("/vendor-subcategories/:id", upload.single("image"), updateVendorSubCategory);
 router.delete("/vendor-subcategories/:id", deleteVendorSubCategory);
 
-/**
- * Riders
- */
-router.post("/riders", upload.single("image"), createRiderByAdmin);
+/* RIDERS */
 router.get("/riders", getAdminRiders);
+router.post("/riders", upload.single("image"), createRiderByAdmin);
+router.patch("/riders/:id", upload.single("image"), updateRiderByAdmin);
+router.patch("/riders/:id/status", toggleUserActiveStatus);
+router.delete("/riders/:id", deleteRiderByAdmin);
 
-/**
- * Menu Items
- */
+/* MENU ITEMS */
 router.get("/menu-items", getAdminMenuItems);
 router.post("/menu-items", upload.single("image"), createMenuItem);
 router.patch("/menu-items/:id", upload.single("image"), updateMenuItem);
 router.delete("/menu-items/:id", deleteMenuItem);
 
-/**
- * Menu Addons
- */
-router.post(
-  "/menu-items/:menuItemId/addons",
-  upload.single("image"),
-  createMenuItemAddon
-);
-
-router.patch(
-  "/menu-addons/:id",
-  upload.single("image"),
-  updateMenuItemAddon
-);
-
+/* MENU ADDONS */
+router.post("/menu-items/:menuItemId/addons", upload.single("image"), createMenuItemAddon);
+router.patch("/menu-addons/:id", upload.single("image"), updateMenuItemAddon);
 router.delete("/menu-addons/:id", deleteMenuItemAddon);
 
-/**
- * Menu Customizations
- */
-router.post(
-  "/menu-items/:menuItemId/customizations",
-  createMenuItemCustomization
-);
+/* MENU CUSTOMIZATIONS */
+router.post("/menu-items/:menuItemId/customizations", createMenuItemCustomization);
+router.patch("/menu-customizations/:id", updateMenuItemCustomization);
+router.delete("/menu-customizations/:id", deleteMenuItemCustomization);
 
-router.patch(
-  "/menu-customizations/:id",
-  updateMenuItemCustomization
-);
-
-router.delete(
-  "/menu-customizations/:id",
-  deleteMenuItemCustomization
-);
-
-/**
- * Orders
- */
+/* ORDERS */
 router.get("/orders", getAdminOrders);
 router.get("/orders/:id", getAdminOrderById);
 router.patch("/orders/:id/status", updateOrderStatusByAdmin);
 router.patch("/orders/:id/assign-rider", assignRiderByAdmin);
 
-/**
- * Billing
- */
+/* BILLING */
 router.get("/riders/:id/billing", getRiderBilling);
 router.get("/billing/monthly", getMonthlyBilling);
+
+/* COUPONS */
+router.get("/coupons", getCoupons);
+router.post("/coupons", createCoupon);
+router.patch("/coupons/:id", updateCoupon);
+router.delete("/coupons/:id", deleteCoupon);
 
 export default router;
