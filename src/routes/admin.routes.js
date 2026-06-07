@@ -5,6 +5,9 @@ import { upload } from "../middleware/upload.middleware.js";
 import {
   getAdminDashboard,
 
+  getAdminProfile,
+  updateAdminProfile,
+
   getAllUsers,
   createRoleUser,
   updateUserRole,
@@ -73,6 +76,8 @@ import {
   createCoupon,
   updateCoupon,
   deleteCoupon,
+  getAdminNotifications,
+sendAdminNotification,
 } from "../controllers/admin.controller.js";
 
 const router = express.Router();
@@ -80,6 +85,10 @@ const router = express.Router();
 router.use(protect, allowRoles("ADMIN"));
 
 router.get("/dashboard", getAdminDashboard);
+
+/* PROFILE */
+router.get("/profile", getAdminProfile);
+router.patch("/profile", upload.single("image"), updateAdminProfile);
 
 /* USERS */
 router.get("/users", getAllUsers);
@@ -133,7 +142,7 @@ router.delete("/vendor-subcategories/:id", deleteVendorSubCategory);
 router.get("/riders", getAdminRiders);
 router.post("/riders", upload.single("image"), createRiderByAdmin);
 router.patch("/riders/:id", upload.single("image"), updateRiderByAdmin);
-router.patch("/riders/:id/status", toggleUserActiveStatus);
+router.patch("/riders/:id/status", updateRiderByAdmin);
 router.delete("/riders/:id", deleteRiderByAdmin);
 
 /* MENU ITEMS */
@@ -167,5 +176,7 @@ router.get("/coupons", getCoupons);
 router.post("/coupons", createCoupon);
 router.patch("/coupons/:id", updateCoupon);
 router.delete("/coupons/:id", deleteCoupon);
-
+/* NOTIFICATIONS */
+router.get("/notifications", getAdminNotifications);
+router.post("/notifications/send", sendAdminNotification);
 export default router;

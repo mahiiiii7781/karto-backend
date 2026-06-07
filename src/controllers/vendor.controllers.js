@@ -1,5 +1,11 @@
+// src/controllers/vendor.controllers.js
+
 import prisma from "../prisma.js";
-import { emitOrderStatus } from "../config/socket.js";
+import {
+  emitOrderStatus,
+  emitVendorDashboardRefresh,
+  emitVendorRiderAssigned,
+} from "../config/socket.js";
 
 const ACTIVE_STATUSES = [
   "PLACED",
@@ -11,7 +17,23 @@ const ACTIVE_STATUSES = [
   "OUT_FOR_DELIVERY",
 ];
 
-const toNumber = value => Number(value || 0);
+const FINAL_REVENUE_STATUSES = ["DELIVERED", "COMPLETED"];
+
+const VENDOR_ALLOWED_STATUSES = [
+  "ACCEPTED_BY_VENDOR",
+  "PREPARING",
+  "READY_FOR_PICKUP",
+  "CANCELLED",
+];
+
+const toNumber = (value) => Number(value || 0);
+
+const normalizeBool = (value, fallback = false) => {
+  if (value === undefined || value === null) return fallback;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") return value.toLowerCase() === "true";
+  return Boolean(value);
+};
 
 const getDateRange = () => {
   const now = new Date();
@@ -28,23 +50,23 @@ const getDateRange = () => {
   return { todayStart, monthStart, last7Days };
 };
 
-const getVendorRestaurantIds = async vendorId => {
+const getVendorRestaurantIds = async (vendorId) => {
   const restaurants = await prisma.restaurant.findMany({
     where: { vendorId },
     select: { id: true },
   });
 
-  return restaurants.map(r => r.id);
+  return restaurants.map((r) => r.id);
 };
 
-const getPrimaryRestaurant = async vendorId => {
+const getPrimaryRestaurant = async (vendorId) => {
   return prisma.restaurant.findFirst({
     where: { vendorId },
     orderBy: { createdAt: "asc" },
   });
 };
 
-const dayNameToNumber = value => {
+const dayNameToNumber = (value) => {
   const map = {
     sunday: 0,
     monday: 1,
@@ -56,8 +78,47 @@ const dayNameToNumber = value => {
   };
 
   if (!value || String(value).toLowerCase() === "none") return null;
-
   return map[String(value).toLowerCase()] ?? null;
+};
+
+const orderInclude = {
+  user: {
+    select: {
+      id: true,
+      fullName: true,
+      phone: true,
+      email: true,
+      avatarUrl: true,
+    },
+  },
+  restaurant: true,
+  address: true,
+  items: {
+    include: { menuItem: true },
+    orderBy: { createdAt: "asc" },
+  },
+  rider: {
+    select: {
+      id: true,
+      fullName: true,
+      phone: true,
+      email: true,
+      avatarUrl: true,
+    },
+  },
+  history: {
+    orderBy: { createdAt: "asc" },
+  },
+};
+
+const emitVendorRefreshSafe = (vendorId, payload = {}) => {
+  try {
+    if (emitVendorDashboardRefresh) {
+      emitVendorDashboardRefresh(vendorId, payload);
+    }
+  } catch (error) {
+    console.warn("Vendor dashboard refresh emit skipped:", error.message);
+  }
 };
 
 /* =========================
@@ -87,13 +148,21 @@ export const getCategories = async (req, res) => {
 
 export const getVendors = async (req, res) => {
   try {
-    const { cityId, categoryId, type } = req.query;
+    const { cityId, categoryId, type, search } = req.query;
 
     const where = {
       isOpen: true,
+      isAcceptingOrders: true,
       ...(cityId && { cityId }),
       ...(categoryId && { categoryId }),
       ...(type && { type }),
+      ...(search && {
+        OR: [
+          { name: { contains: search, mode: "insensitive" } },
+          { description: { contains: search, mode: "insensitive" } },
+          { address: { contains: search, mode: "insensitive" } },
+        ],
+      }),
     };
 
     const vendors = await prisma.restaurant.findMany({
@@ -245,61 +314,55 @@ export const getVendorDashboard = async (req, res) => {
       },
     });
 
-    const restaurantIds = restaurants.map(r => r.id);
+    const restaurantIds = restaurants.map((r) => r.id);
 
     const todayOrders = await prisma.order.findMany({
       where: {
-        vendorId,
+        restaurantId: { in: restaurantIds },
         createdAt: { gte: todayStart },
       },
     });
 
     const monthlyOrders = await prisma.order.findMany({
       where: {
-        vendorId,
+        restaurantId: { in: restaurantIds },
         createdAt: { gte: monthStart },
       },
     });
 
     const activeOrders = await prisma.order.count({
       where: {
-        vendorId,
+        restaurantId: { in: restaurantIds },
         status: { in: ACTIVE_STATUSES },
       },
     });
 
-    const deliveredOrders = await prisma.order.findMany({
+    const pendingOrders = await prisma.order.count({
       where: {
-        vendorId,
-        status: "DELIVERED",
+        restaurantId: { in: restaurantIds },
+        status: "PLACED",
+      },
+    });
+
+    const completedOrdersData = await prisma.order.findMany({
+      where: {
+        restaurantId: { in: restaurantIds },
+        status: { in: FINAL_REVENUE_STATUSES },
       },
     });
 
     const cancelledOrders = await prisma.order.count({
       where: {
-        vendorId,
+        restaurantId: { in: restaurantIds },
         status: "CANCELLED",
       },
     });
 
     const recentOrders = await prisma.order.findMany({
-      where: { vendorId },
-      include: {
-        user: {
-          select: {
-            id: true,
-            fullName: true,
-            phone: true,
-            email: true,
-          },
-        },
-        restaurant: true,
-        address: true,
-        items: {
-          include: { menuItem: true },
-          orderBy: { createdAt: "asc" },
-        },
+      where: {
+        restaurantId: { in: restaurantIds },
       },
+      include: orderInclude,
       orderBy: { createdAt: "desc" },
       take: 10,
     });
@@ -314,17 +377,15 @@ export const getVendorDashboard = async (req, res) => {
       0
     );
 
-    const todayRevenue = todayOrders.reduce(
-      (sum, order) => sum + toNumber(order.totalAmount),
-      0
-    );
+    const todayRevenue = todayOrders
+      .filter((o) => FINAL_REVENUE_STATUSES.includes(o.status))
+      .reduce((sum, order) => sum + toNumber(order.totalAmount), 0);
 
-    const monthlyRevenue = monthlyOrders.reduce(
-      (sum, order) => sum + toNumber(order.totalAmount),
-      0
-    );
+    const monthlyRevenue = monthlyOrders
+      .filter((o) => FINAL_REVENUE_STATUSES.includes(o.status))
+      .reduce((sum, order) => sum + toNumber(order.totalAmount), 0);
 
-    const lifetimeRevenue = deliveredOrders.reduce(
+    const lifetimeRevenue = completedOrdersData.reduce(
       (sum, order) => sum + toNumber(order.totalAmount),
       0
     );
@@ -343,8 +404,10 @@ export const getVendorDashboard = async (req, res) => {
         monthlyOrders: monthlyOrders.length,
         monthlyRevenue,
         lifetimeRevenue,
+        revenue: lifetimeRevenue,
         activeOrders,
-        completedOrders: deliveredOrders.length,
+        pendingOrders,
+        completedOrders: completedOrdersData.length,
         cancelledOrders,
         averageOrderValue,
         restaurants,
@@ -375,43 +438,32 @@ export const getVendorDashboard = async (req, res) => {
 
 export const getVendorOrders = async (req, res) => {
   try {
-    const { status } = req.query;
+    const { status, search } = req.query;
+
+    const restaurantIds = await getVendorRestaurantIds(req.user.id);
 
     const where = {
-      vendorId: req.user.id,
-      ...(status && { status }),
+      restaurantId: { in: restaurantIds },
+      ...(status && status !== "ALL" && { status }),
     };
 
-    const orders = await prisma.order.findMany({
+    let orders = await prisma.order.findMany({
       where,
-      include: {
-        user: {
-          select: {
-            id: true,
-            fullName: true,
-            phone: true,
-            email: true,
-          },
-        },
-        restaurant: true,
-        address: true,
-        items: {
-          include: { menuItem: true },
-          orderBy: { createdAt: "asc" },
-        },
-        rider: {
-          select: {
-            id: true,
-            fullName: true,
-            phone: true,
-          },
-        },
-        history: {
-          orderBy: { createdAt: "asc" },
-        },
-      },
+      include: orderInclude,
       orderBy: { createdAt: "desc" },
     });
+
+    if (search) {
+      const q = String(search).toLowerCase();
+      orders = orders.filter((order) => {
+        return (
+          order.id?.toLowerCase().includes(q) ||
+          order.user?.fullName?.toLowerCase().includes(q) ||
+          order.user?.phone?.toLowerCase().includes(q) ||
+          order.restaurant?.name?.toLowerCase().includes(q)
+        );
+      });
+    }
 
     return res.json({
       success: true,
@@ -430,29 +482,22 @@ export const getVendorOrders = async (req, res) => {
 
 export const updateVendorOrderStatus = async (req, res) => {
   try {
-    const { orderId, id } = req.params;
-    const finalOrderId = orderId || id;
-
+    const finalOrderId = req.params.orderId || req.params.id;
     const { status, note, estimatedPreparationMinutes } = req.body;
 
-    const allowedVendorStatuses = [
-      "ACCEPTED_BY_VENDOR",
-      "PREPARING",
-      "READY_FOR_PICKUP",
-      "CANCELLED",
-    ];
-
-    if (!allowedVendorStatuses.includes(status)) {
+    if (!VENDOR_ALLOWED_STATUSES.includes(status)) {
       return res.status(400).json({
         success: false,
         message: "Invalid vendor order status",
       });
     }
 
+    const restaurantIds = await getVendorRestaurantIds(req.user.id);
+
     const existingOrder = await prisma.order.findFirst({
       where: {
         id: finalOrderId,
-        vendorId: req.user.id,
+        restaurantId: { in: restaurantIds },
       },
       include: { restaurant: true },
     });
@@ -471,6 +516,7 @@ export const updateVendorOrderStatus = async (req, res) => {
       updateData.estimatedPreparationMinutes =
         Number(estimatedPreparationMinutes) ||
         existingOrder.estimatedPreparationMinutes ||
+        existingOrder.restaurant?.defaultPrepTime ||
         30;
     }
 
@@ -488,33 +534,11 @@ export const updateVendorOrderStatus = async (req, res) => {
       updateData.cancelledBy = req.user.id;
     }
 
-    const order = await prisma.$transaction(async tx => {
+    const order = await prisma.$transaction(async (tx) => {
       const updated = await tx.order.update({
         where: { id: finalOrderId },
         data: updateData,
-        include: {
-          user: {
-            select: {
-              id: true,
-              fullName: true,
-              phone: true,
-              email: true,
-            },
-          },
-          restaurant: true,
-          address: true,
-          items: {
-            include: { menuItem: true },
-            orderBy: { createdAt: "asc" },
-          },
-          rider: {
-            select: {
-              id: true,
-              fullName: true,
-              phone: true,
-            },
-          },
-        },
+        include: orderInclude,
       });
 
       await tx.orderStatusHistory.create({
@@ -530,6 +554,7 @@ export const updateVendorOrderStatus = async (req, res) => {
     });
 
     emitOrderStatus(finalOrderId, status, { order });
+    emitVendorRefreshSafe(req.user.id, { reason: "ORDER_STATUS_UPDATED", order });
 
     return res.json({
       success: true,
@@ -561,10 +586,12 @@ export const updatePreparationTime = async (req, res) => {
       });
     }
 
+    const restaurantIds = await getVendorRestaurantIds(req.user.id);
+
     const order = await prisma.order.findFirst({
       where: {
         id,
-        vendorId: req.user.id,
+        restaurantId: { in: restaurantIds },
       },
     });
 
@@ -578,6 +605,12 @@ export const updatePreparationTime = async (req, res) => {
     const updated = await prisma.order.update({
       where: { id },
       data: { estimatedPreparationMinutes: minutes },
+      include: orderInclude,
+    });
+
+    emitVendorRefreshSafe(req.user.id, {
+      reason: "PREPARATION_TIME_UPDATED",
+      order: updated,
     });
 
     return res.json({
@@ -597,17 +630,211 @@ export const updatePreparationTime = async (req, res) => {
 };
 
 /* =========================
-   VENDOR MENU
+   RIDERS
+========================= */
+
+export const getAvailableRidersForVendor = async (req, res) => {
+  try {
+    const riders = await prisma.user.findMany({
+      where: { role: "RIDER" },
+      select: {
+        id: true,
+        fullName: true,
+        phone: true,
+        email: true,
+        avatarUrl: true,
+        createdAt: true,
+      },
+      orderBy: { createdAt: "desc" },
+    });
+
+    const mappedRiders = riders.map((rider) => ({
+      id: rider.id,
+      fullName: rider.fullName,
+      phone: rider.phone,
+      email: rider.email,
+      avatarUrl: rider.avatarUrl,
+      isAvailable: true,
+      currentStatus: "AVAILABLE",
+      distanceKm: null,
+      distanceText: "Distance unavailable",
+    }));
+
+    return res.json({
+      success: true,
+      data: mappedRiders,
+      riders: mappedRiders,
+    });
+  } catch (error) {
+    console.error("Get Available Riders Error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+      error: error.message,
+    });
+  }
+};
+
+export const assignVendorOrderRider = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { riderId } = req.body;
+
+    if (!riderId) {
+      return res.status(400).json({
+        success: false,
+        message: "Rider id is required",
+      });
+    }
+
+    const restaurantIds = await getVendorRestaurantIds(req.user.id);
+
+    const existingOrder = await prisma.order.findFirst({
+      where: {
+        id,
+        restaurantId: { in: restaurantIds },
+      },
+      include: {
+        rider: {
+          select: {
+            id: true,
+            fullName: true,
+            phone: true,
+            email: true,
+          },
+        },
+      },
+    });
+
+    if (!existingOrder) {
+      return res.status(404).json({
+        success: false,
+        message: "Order not found for this vendor",
+      });
+    }
+
+    if (
+      existingOrder.status !== "READY_FOR_PICKUP" &&
+      existingOrder.status !== "ASSIGNED_TO_RIDER"
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Rider can be assigned only after order is ready",
+      });
+    }
+
+    const rider = await prisma.user.findFirst({
+      where: {
+        id: riderId,
+        role: "RIDER",
+      },
+      select: {
+        id: true,
+        fullName: true,
+        phone: true,
+        email: true,
+        avatarUrl: true,
+      },
+    });
+
+    if (!rider) {
+      return res.status(404).json({
+        success: false,
+        message: "Rider not found",
+      });
+    }
+
+    const order = await prisma.$transaction(async (tx) => {
+      const updated = await tx.order.update({
+        where: { id },
+        data: {
+          riderId,
+          status: "ASSIGNED_TO_RIDER",
+        },
+        include: orderInclude,
+      });
+
+      await tx.orderStatusHistory.create({
+        data: {
+          orderId: id,
+          status: "ASSIGNED_TO_RIDER",
+          changedBy: req.user.id,
+          note: existingOrder.riderId
+            ? `Rider reassigned to ${rider.fullName || rider.phone || rider.id}`
+            : `Rider assigned to ${rider.fullName || rider.phone || rider.id}`,
+        },
+      });
+
+      return updated;
+    });
+
+    emitOrderStatus(id, "ASSIGNED_TO_RIDER", {
+      order,
+      rider,
+      assignedBy: req.user.id,
+    });
+
+    try {
+      if (emitVendorRiderAssigned) {
+        emitVendorRiderAssigned(req.user.id, {
+          order,
+          rider,
+        });
+      }
+    } catch (error) {
+      console.warn("Vendor rider assigned socket skipped:", error.message);
+    }
+
+    emitVendorRefreshSafe(req.user.id, {
+      reason: existingOrder.riderId ? "RIDER_REASSIGNED" : "RIDER_ASSIGNED",
+      order,
+      rider,
+    });
+
+    return res.json({
+      success: true,
+      message: existingOrder.riderId
+        ? "Rider reassigned successfully"
+        : "Rider assigned successfully",
+      data: order,
+      order,
+    });
+  } catch (error) {
+    console.error("Assign Vendor Order Rider Error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+      error: error.message,
+    });
+  }
+};
+
+/* =========================
+   MENU
 ========================= */
 
 export const getVendorMenu = async (req, res) => {
   try {
+    const { search, categoryId, available } = req.query;
+
     const restaurantIds = await getVendorRestaurantIds(req.user.id);
 
+    const where = {
+      restaurantId: { in: restaurantIds },
+      ...(categoryId && { vendorCategoryId: categoryId }),
+      ...(available !== undefined && {
+        isAvailable: normalizeBool(available),
+      }),
+      ...(search && {
+        OR: [
+          { name: { contains: search, mode: "insensitive" } },
+          { description: { contains: search, mode: "insensitive" } },
+        ],
+      }),
+    };
+
     const items = await prisma.menuItem.findMany({
-      where: {
-        restaurantId: { in: restaurantIds },
-      },
+      where,
       include: {
         category: true,
         subCategory: true,
@@ -665,7 +892,7 @@ export const createVendorMenuItem = async (req, res) => {
       vendorSubCategoryId,
     } = req.body;
 
-    if (!name || !price) {
+    if (!name || price === undefined || price === null) {
       return res.status(400).json({
         success: false,
         message: "Name and price are required",
@@ -678,17 +905,15 @@ export const createVendorMenuItem = async (req, res) => {
         name: String(name).trim(),
         description: description || null,
         price: Number(price),
-        imageUrl: imageUrl || null,
-        isVeg: isVeg === undefined ? true : Boolean(isVeg),
+        imageUrl: imageUrl || req.file?.path || null,
+        isVeg: normalizeBool(isVeg, true),
         isVegetarian:
           isVegetarian === undefined
-            ? isVeg === undefined
-              ? true
-              : Boolean(isVeg)
-            : Boolean(isVegetarian),
-        isPopular: Boolean(isPopular),
-        isBestSeller: Boolean(isBestSeller),
-        isAvailable: isAvailable === undefined ? true : Boolean(isAvailable),
+            ? normalizeBool(isVeg, true)
+            : normalizeBool(isVegetarian, true),
+        isPopular: normalizeBool(isPopular),
+        isBestSeller: normalizeBool(isBestSeller),
+        isAvailable: normalizeBool(isAvailable, true),
         prepTimeMin: Number(prepTimeMin) || 20,
         categoryId: categoryId || null,
         subCategoryId: subCategoryId || null,
@@ -701,6 +926,11 @@ export const createVendorMenuItem = async (req, res) => {
         vendorCategory: true,
         vendorSubCategory: true,
       },
+    });
+
+    emitVendorRefreshSafe(req.user.id, {
+      reason: "MENU_ITEM_CREATED",
+      item,
     });
 
     return res.status(201).json({
@@ -763,10 +993,23 @@ export const updateVendorMenuItem = async (req, res) => {
       }
     }
 
+    if (req.file?.path) {
+      data.imageUrl = req.file.path;
+    }
+
+    if (data.name !== undefined) data.name = String(data.name).trim();
     if (data.price !== undefined) data.price = Number(data.price);
     if (data.prepTimeMin !== undefined) {
       data.prepTimeMin = Number(data.prepTimeMin) || 20;
     }
+
+    ["isVeg", "isVegetarian", "isPopular", "isBestSeller", "isAvailable"].forEach(
+      (field) => {
+        if (data[field] !== undefined) {
+          data[field] = normalizeBool(data[field]);
+        }
+      }
+    );
 
     const updated = await prisma.menuItem.update({
       where: { id },
@@ -779,6 +1022,11 @@ export const updateVendorMenuItem = async (req, res) => {
       },
     });
 
+    emitVendorRefreshSafe(req.user.id, {
+      reason: "MENU_ITEM_UPDATED",
+      item: updated,
+    });
+
     return res.json({
       success: true,
       message: "Menu item updated",
@@ -787,6 +1035,62 @@ export const updateVendorMenuItem = async (req, res) => {
     });
   } catch (error) {
     console.error("Update Vendor Menu Item Error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+      error: error.message,
+    });
+  }
+};
+
+export const toggleVendorMenuItemAvailability = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const restaurantIds = await getVendorRestaurantIds(req.user.id);
+
+    const existing = await prisma.menuItem.findFirst({
+      where: {
+        id,
+        restaurantId: { in: restaurantIds },
+      },
+    });
+
+    if (!existing) {
+      return res.status(404).json({
+        success: false,
+        message: "Menu item not found",
+      });
+    }
+
+    const updated = await prisma.menuItem.update({
+      where: { id },
+      data: {
+        isAvailable:
+          req.body.isAvailable !== undefined
+            ? normalizeBool(req.body.isAvailable)
+            : !existing.isAvailable,
+      },
+      include: {
+        category: true,
+        subCategory: true,
+        vendorCategory: true,
+        vendorSubCategory: true,
+      },
+    });
+
+    emitVendorRefreshSafe(req.user.id, {
+      reason: "MENU_ITEM_AVAILABILITY_UPDATED",
+      item: updated,
+    });
+
+    return res.json({
+      success: true,
+      message: "Menu item availability updated",
+      data: updated,
+      item: updated,
+    });
+  } catch (error) {
+    console.error("Toggle Menu Item Availability Error:", error);
     return res.status(500).json({
       success: false,
       message: "Something went wrong",
@@ -816,6 +1120,11 @@ export const deleteVendorMenuItem = async (req, res) => {
 
     await prisma.menuItem.delete({
       where: { id },
+    });
+
+    emitVendorRefreshSafe(req.user.id, {
+      reason: "MENU_ITEM_DELETED",
+      itemId: id,
     });
 
     return res.json({
@@ -893,13 +1202,18 @@ export const createVendorCategory = async (req, res) => {
         restaurantId: restaurant.id,
         name: String(name).trim(),
         description: description || null,
-        imageUrl: imageUrl || null,
-        isActive: isActive === undefined ? true : Boolean(isActive),
+        imageUrl: imageUrl || req.file?.path || null,
+        isActive: normalizeBool(isActive, true),
       },
       include: {
         subCategories: true,
         menuItems: true,
       },
+    });
+
+    emitVendorRefreshSafe(req.user.id, {
+      reason: "VENDOR_CATEGORY_CREATED",
+      category,
     });
 
     return res.status(201).json({
@@ -945,12 +1259,18 @@ export const updateVendorCategory = async (req, res) => {
         ...(name !== undefined && { name: String(name).trim() }),
         ...(description !== undefined && { description }),
         ...(imageUrl !== undefined && { imageUrl }),
-        ...(isActive !== undefined && { isActive: Boolean(isActive) }),
+        ...(req.file?.path && { imageUrl: req.file.path }),
+        ...(isActive !== undefined && { isActive: normalizeBool(isActive) }),
       },
       include: {
         subCategories: true,
         menuItems: true,
       },
+    });
+
+    emitVendorRefreshSafe(req.user.id, {
+      reason: "VENDOR_CATEGORY_UPDATED",
+      category,
     });
 
     return res.json({
@@ -1004,6 +1324,11 @@ export const deleteVendorCategory = async (req, res) => {
       where: { id },
     });
 
+    emitVendorRefreshSafe(req.user.id, {
+      reason: "VENDOR_CATEGORY_DELETED",
+      categoryId: id,
+    });
+
     return res.json({
       success: true,
       message: "Category deleted",
@@ -1019,8 +1344,53 @@ export const deleteVendorCategory = async (req, res) => {
 };
 
 /* =========================
-   VENDOR SETTINGS
+   PROFILE / SETTINGS
 ========================= */
+
+export const getVendorProfile = async (req, res) => {
+  try {
+    const restaurant = await getPrimaryRestaurant(req.user.id);
+
+    if (!restaurant) {
+      return res.status(404).json({
+        success: false,
+        message: "Restaurant not found for this vendor",
+      });
+    }
+
+    const finalRestaurant = await prisma.restaurant.findUnique({
+      where: { id: restaurant.id },
+      include: {
+        vendor: {
+          select: {
+            id: true,
+            fullName: true,
+            email: true,
+            phone: true,
+            avatarUrl: true,
+          },
+        },
+        city: true,
+        category: true,
+        timings: true,
+      },
+    });
+
+    return res.json({
+      success: true,
+      data: finalRestaurant,
+      restaurant: finalRestaurant,
+      profile: finalRestaurant,
+    });
+  } catch (error) {
+    console.error("Get Vendor Profile Error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+      error: error.message,
+    });
+  }
+};
 
 export const updateVendorSettings = async (req, res) => {
   try {
@@ -1060,11 +1430,13 @@ export const updateVendorSettings = async (req, res) => {
     if (address !== undefined) data.address = String(address).trim();
     if (deliveryTime !== undefined) data.deliveryTime = String(deliveryTime);
     if (minimumOrder !== undefined) data.minimumOrder = Number(minimumOrder);
-    if (isOpen !== undefined) data.isOpen = Boolean(isOpen);
-    if (isAcceptingOrders !== undefined)
-      data.isAcceptingOrders = Boolean(isAcceptingOrders);
-    if (defaultPrepTime !== undefined)
+    if (isOpen !== undefined) data.isOpen = normalizeBool(isOpen);
+    if (isAcceptingOrders !== undefined) {
+      data.isAcceptingOrders = normalizeBool(isAcceptingOrders);
+    }
+    if (defaultPrepTime !== undefined) {
       data.defaultPrepTime = Number(defaultPrepTime) || 30;
+    }
     if (openingTime !== undefined) data.openingTime = String(openingTime);
     if (closingTime !== undefined) data.closingTime = String(closingTime);
     if (weeklyOffDay !== undefined) data.weeklyOffDay = String(weeklyOffDay);
@@ -1107,6 +1479,11 @@ export const updateVendorSettings = async (req, res) => {
       include: { timings: true },
     });
 
+    emitVendorRefreshSafe(req.user.id, {
+      reason: "VENDOR_SETTINGS_UPDATED",
+      restaurant: finalRestaurant || updated,
+    });
+
     return res.json({
       success: true,
       message: "Vendor settings updated",
@@ -1115,6 +1492,55 @@ export const updateVendorSettings = async (req, res) => {
     });
   } catch (error) {
     console.error("Update Vendor Settings Error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong",
+      error: error.message,
+    });
+  }
+};
+
+export const toggleVendorOpenClose = async (req, res) => {
+  try {
+    const restaurant = await getPrimaryRestaurant(req.user.id);
+
+    if (!restaurant) {
+      return res.status(404).json({
+        success: false,
+        message: "Restaurant not found for this vendor",
+      });
+    }
+
+    const nextOpen =
+      req.body.isOpen !== undefined
+        ? normalizeBool(req.body.isOpen)
+        : !restaurant.isOpen;
+
+    const updated = await prisma.restaurant.update({
+      where: { id: restaurant.id },
+      data: {
+        isOpen: nextOpen,
+        isAcceptingOrders:
+          req.body.isAcceptingOrders !== undefined
+            ? normalizeBool(req.body.isAcceptingOrders)
+            : nextOpen,
+      },
+      include: { timings: true },
+    });
+
+    emitVendorRefreshSafe(req.user.id, {
+      reason: "VENDOR_OPEN_CLOSE_UPDATED",
+      restaurant: updated,
+    });
+
+    return res.json({
+      success: true,
+      message: nextOpen ? "Restaurant opened" : "Restaurant closed",
+      data: updated,
+      restaurant: updated,
+    });
+  } catch (error) {
+    console.error("Toggle Vendor Open Close Error:", error);
     return res.status(500).json({
       success: false,
       message: "Something went wrong",
@@ -1152,6 +1578,14 @@ export const setVendorBusyMode = async (req, res) => {
         isAcceptingOrders: false,
         busyUntil,
       },
+      include: { timings: true },
+    });
+
+    emitVendorRefreshSafe(req.user.id, {
+      reason: "VENDOR_BUSY_MODE_ENABLED",
+      restaurant: updated,
+      busyUntil,
+      busyMinutes: minutes,
     });
 
     return res.json({
@@ -1174,7 +1608,7 @@ export const setVendorBusyMode = async (req, res) => {
 };
 
 /* =========================
-   PAYMENTS
+   PAYMENTS / ANALYTICS
 ========================= */
 
 export const getVendorPayments = async (req, res) => {
@@ -1191,11 +1625,11 @@ export const getVendorPayments = async (req, res) => {
     });
 
     const pendingAmount = settlements
-      .filter(s => s.status === "PENDING")
+      .filter((s) => s.status === "PENDING")
       .reduce((sum, s) => sum + toNumber(s.netAmount), 0);
 
     const paidAmount = settlements
-      .filter(s => s.status === "PAID")
+      .filter((s) => s.status === "PAID")
       .reduce((sum, s) => sum + toNumber(s.netAmount), 0);
 
     const grossEarnings = settlements.reduce(
@@ -1234,10 +1668,6 @@ export const getVendorPayments = async (req, res) => {
   }
 };
 
-/* =========================
-   GRAPH
-========================= */
-
 export const getVendorEarningsGraph = async (req, res) => {
   try {
     const vendorId = req.user.id;
@@ -1249,7 +1679,7 @@ export const getVendorEarningsGraph = async (req, res) => {
       where: {
         restaurantId: { in: restaurantIds },
         createdAt: { gte: last7Days },
-        status: { not: "CANCELLED" },
+        status: { in: FINAL_REVENUE_STATUSES },
       },
       select: {
         createdAt: true,
@@ -1266,7 +1696,7 @@ export const getVendorEarningsGraph = async (req, res) => {
       const key = date.toISOString().slice(0, 10);
 
       const total = orders
-        .filter(o => o.createdAt.toISOString().slice(0, 10) === key)
+        .filter((o) => o.createdAt.toISOString().slice(0, 10) === key)
         .reduce((sum, o) => sum + toNumber(o.totalAmount), 0);
 
       result.push({
@@ -1275,6 +1705,7 @@ export const getVendorEarningsGraph = async (req, res) => {
           weekday: "short",
         }),
         earnings: total,
+        revenue: total,
       });
     }
 
@@ -1291,43 +1722,56 @@ export const getVendorEarningsGraph = async (req, res) => {
     });
   }
 };
-export const getAvailableRidersForVendor = async (req, res) => {
+
+/* =========================
+   NOTIFICATIONS
+========================= */
+
+export const getVendorNotifications = async (req, res) => {
   try {
-    const riders = await prisma.user.findMany({
+    const restaurantIds = await getVendorRestaurantIds(req.user.id);
+
+    const recentOrders = await prisma.order.findMany({
       where: {
-        role: "RIDER",
+        restaurantId: { in: restaurantIds },
+        status: {
+          in: [
+            "PLACED",
+            "ACCEPTED_BY_VENDOR",
+            "PREPARING",
+            "READY_FOR_PICKUP",
+            "ASSIGNED_TO_RIDER",
+          ],
+        },
       },
-      select: {
-        id: true,
-        fullName: true,
-        phone: true,
-        email: true,
-        avatarUrl: true,
-        createdAt: true,
-      },
-      orderBy: {
-        createdAt: "desc",
-      },
+      include: orderInclude,
+      orderBy: { createdAt: "desc" },
+      take: 30,
     });
 
-    const mappedRiders = riders.map(rider => ({
-      id: rider.id,
-      fullName: rider.fullName,
-      phone: rider.phone,
-      email: rider.email,
-      avatarUrl: rider.avatarUrl,
-      isAvailable: true,
-      currentStatus: "AVAILABLE",
+    const notifications = recentOrders.map((order) => ({
+      id: `order-${order.id}`,
+      type: "ORDER",
+      title:
+        order.status === "PLACED"
+          ? "New order received"
+          : `Order ${order.status.replaceAll("_", " ").toLowerCase()}`,
+      message: `Order from ${order.user?.fullName || "Customer"} • ₹${toNumber(
+        order.totalAmount
+      ).toFixed(2)}`,
+      orderId: order.id,
+      order,
+      isRead: false,
+      createdAt: order.createdAt,
     }));
 
     return res.json({
       success: true,
-      data: mappedRiders,
-      riders: mappedRiders,
+      data: notifications,
+      notifications,
     });
   } catch (error) {
-    console.error("Get Available Riders Error:", error);
-
+    console.error("Vendor Notifications Error:", error);
     return res.status(500).json({
       success: false,
       message: "Something went wrong",
@@ -1336,152 +1780,6 @@ export const getAvailableRidersForVendor = async (req, res) => {
   }
 };
 
-export const assignVendorOrderRider = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { riderId } = req.body;
-
-    if (!riderId) {
-      return res.status(400).json({
-        success: false,
-        message: "Rider id is required",
-      });
-    }
-
-    const existingOrder = await prisma.order.findFirst({
-      where: {
-        id,
-        vendorId: req.user.id,
-      },
-      include: {
-        rider: {
-          select: {
-            id: true,
-            fullName: true,
-            phone: true,
-            email: true,
-          },
-        },
-      },
-    });
-
-    if (!existingOrder) {
-      return res.status(404).json({
-        success: false,
-        message: "Order not found for this vendor",
-      });
-    }
-
-    if (
-      existingOrder.status !== "READY_FOR_PICKUP" &&
-      existingOrder.status !== "ASSIGNED_TO_RIDER"
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: "Rider can be assigned only after order is ready",
-      });
-    }
-
-    const rider = await prisma.user.findFirst({
-      where: {
-        id: riderId,
-        role: "RIDER",
-      },
-      select: {
-        id: true,
-        fullName: true,
-        phone: true,
-        email: true,
-      },
-    });
-
-    if (!rider) {
-      return res.status(404).json({
-        success: false,
-        message: "Rider not found",
-      });
-    }
-
-    const order = await prisma.$transaction(async tx => {
-      const updated = await tx.order.update({
-        where: { id },
-        data: {
-          riderId,
-          status: "ASSIGNED_TO_RIDER",
-        },
-        include: {
-          user: {
-            select: {
-              id: true,
-              fullName: true,
-              phone: true,
-              email: true,
-            },
-          },
-          restaurant: true,
-          address: true,
-          rider: {
-            select: {
-              id: true,
-              fullName: true,
-              phone: true,
-              email: true,
-            },
-          },
-          items: {
-            include: {
-              menuItem: true,
-            },
-            orderBy: {
-              createdAt: "asc",
-            },
-          },
-          history: {
-            orderBy: {
-              createdAt: "asc",
-            },
-          },
-        },
-      });
-
-      await tx.orderStatusHistory.create({
-        data: {
-          orderId: id,
-          status: "ASSIGNED_TO_RIDER",
-          changedBy: req.user.id,
-          note: existingOrder.riderId
-            ? `Rider reassigned to ${rider.fullName || rider.phone || rider.id}`
-            : `Rider assigned to ${rider.fullName || rider.phone || rider.id}`,
-        },
-      });
-
-      return updated;
-    });
-
-    emitOrderStatus(id, "ASSIGNED_TO_RIDER", {
-      order,
-      rider,
-      assignedBy: req.user.id,
-    });
-
-    return res.json({
-      success: true,
-      message: existingOrder.riderId
-        ? "Rider reassigned successfully"
-        : "Rider assigned successfully",
-      data: order,
-      order,
-    });
-  } catch (error) {
-    console.error("Assign Vendor Order Rider Error:", error);
-
-    return res.status(500).json({
-      success: false,
-      message: "Something went wrong",
-      error: error.message,
-    });
-  }
-};
 export default {
   getCategories,
   getVendors,
@@ -1491,11 +1789,14 @@ export default {
   getVendorOrders,
   updateVendorOrderStatus,
   updatePreparationTime,
-getAvailableRidersForVendor,
-assignVendorOrderRider,
+
+  getAvailableRidersForVendor,
+  assignVendorOrderRider,
+
   getVendorMenu,
   createVendorMenuItem,
   updateVendorMenuItem,
+  toggleVendorMenuItemAvailability,
   deleteVendorMenuItem,
 
   getVendorCategories,
@@ -1503,9 +1804,13 @@ assignVendorOrderRider,
   updateVendorCategory,
   deleteVendorCategory,
 
+  getVendorProfile,
   updateVendorSettings,
+  toggleVendorOpenClose,
   setVendorBusyMode,
 
   getVendorPayments,
   getVendorEarningsGraph,
+
+  getVendorNotifications,
 };

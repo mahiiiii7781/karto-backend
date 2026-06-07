@@ -2,16 +2,55 @@ import prisma from "../prisma.js";
 
 const toNumber = value => Number(value || 0);
 
-const round2 = value => Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
+const round2 = value =>
+  Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
 
 const normalizeIds = value => {
   if (!Array.isArray(value)) return [];
-  return value.filter(Boolean);
+
+  return [...new Set(value.map(item => String(item).trim()).filter(Boolean))];
 };
+
+const sortIds = ids => normalizeIds(ids).sort();
 
 const PLATFORM_FEE = round2(process.env.KARTO_PLATFORM_FEE || 5);
 const CGST_RATE = round2(process.env.KARTO_CGST_RATE || 2.5);
 const SGST_RATE = round2(process.env.KARTO_SGST_RATE || 2.5);
+
+const getSelectedIdsFromJson = value => {
+  if (!Array.isArray(value)) return [];
+
+  return sortIds(value.map(item => item?.id).filter(Boolean));
+};
+
+const isSameIdSet = (a = [], b = []) => {
+  const first = sortIds(a);
+  const second = sortIds(b);
+
+  if (first.length !== second.length) return false;
+
+  return first.every((id, index) => id === second[index]);
+};
+
+const isSameCartConfiguration = ({
+  cartItem,
+  menuItemId,
+  customizationIds = [],
+  addonIds = [],
+}) => {
+  if (!cartItem || cartItem.menuItemId !== menuItemId) return false;
+
+  const existingCustomizationIds = getSelectedIdsFromJson(
+    cartItem.customizationJson
+  );
+
+  const existingAddonIds = getSelectedIdsFromJson(cartItem.addonJson);
+
+  return (
+    isSameIdSet(existingCustomizationIds, customizationIds) &&
+    isSameIdSet(existingAddonIds, addonIds)
+  );
+};
 
 const getCartSummary = cartItems => {
   const itemCount = cartItems.reduce(
@@ -78,26 +117,52 @@ const calculateItemPricing = async ({
   addonIds = [],
 }) => {
   const safeQuantity = Math.max(1, Number(quantity) || 1);
+  const safeCustomizationIds = normalizeIds(customizationIds);
+  const safeAddonIds = normalizeIds(addonIds);
 
-  const customizations = customizationIds.length
+  const customizations = safeCustomizationIds.length
     ? await prisma.menuItemCustomization.findMany({
         where: {
-          id: { in: customizationIds },
+          id: { in: safeCustomizationIds },
           menuItemId: menuItem.id,
           isActive: true,
         },
       })
     : [];
 
-  const addons = addonIds.length
+  const addons = safeAddonIds.length
     ? await prisma.menuItemAddon.findMany({
         where: {
-          id: { in: addonIds },
+          id: { in: safeAddonIds },
           menuItemId: menuItem.id,
           isActive: true,
         },
       })
     : [];
+
+  if (customizations.length !== safeCustomizationIds.length) {
+    const foundIds = customizations.map(item => item.id);
+
+    return {
+      error: true,
+      status: 400,
+      message: "Invalid or inactive customization selected",
+      invalidCustomizationIds: safeCustomizationIds.filter(
+        id => !foundIds.includes(id)
+      ),
+    };
+  }
+
+  if (addons.length !== safeAddonIds.length) {
+    const foundIds = addons.map(item => item.id);
+
+    return {
+      error: true,
+      status: 400,
+      message: "Invalid or inactive addon selected",
+      invalidAddonIds: safeAddonIds.filter(id => !foundIds.includes(id)),
+    };
+  }
 
   const basePrice = toNumber(menuItem.price);
 
@@ -115,6 +180,7 @@ const calculateItemPricing = async ({
   const totalPrice = round2(unitPrice * safeQuantity);
 
   return {
+    error: false,
     safeQuantity,
     unitPrice,
     totalPrice,
@@ -132,19 +198,32 @@ const calculateItemPricing = async ({
   };
 };
 
+const getUserCartItems = async userId => {
+  return prisma.cartItem.findMany({
+    where: { userId },
+    include: {
+      menuItem: true,
+      restaurant: true,
+    },
+    orderBy: { createdAt: "asc" },
+  });
+};
+
+const getCartPayload = async userId => {
+  const cartItems = await getUserCartItems(userId);
+  const summary = getCartSummary(cartItems);
+  const pricing = calculateCartPricingFromItems(cartItems);
+
+  return {
+    cartItems,
+    summary,
+    pricing,
+  };
+};
+
 export const getCart = async (req, res) => {
   try {
-    const cartItems = await prisma.cartItem.findMany({
-      where: { userId: req.user.id },
-      include: {
-        menuItem: true,
-        restaurant: true,
-      },
-      orderBy: { createdAt: "desc" },
-    });
-
-    const summary = getCartSummary(cartItems);
-    const pricing = calculateCartPricingFromItems(cartItems);
+    const { cartItems, summary, pricing } = await getCartPayload(req.user.id);
 
     return res.json({
       success: true,
@@ -165,26 +244,20 @@ export const getCart = async (req, res) => {
 
 export const getCartPricing = async (req, res) => {
   try {
-    const cartItems = await prisma.cartItem.findMany({
-      where: { userId: req.user.id },
-      include: {
-        menuItem: true,
-        restaurant: true,
-      },
-      orderBy: { createdAt: "asc" },
-    });
-
-    const pricing = calculateCartPricingFromItems(cartItems);
-    const summary = getCartSummary(cartItems);
+    const { summary, pricing } = await getCartPayload(req.user.id);
 
     return res.json({
       success: true,
       data: {
         pricing,
         itemCount: summary.itemCount,
+        totalAmount: summary.totalAmount,
+        total: summary.total,
       },
       pricing,
       itemCount: summary.itemCount,
+      totalAmount: summary.totalAmount,
+      total: summary.total,
     });
   } catch (error) {
     console.error("Get Cart Pricing Error:", error);
@@ -241,6 +314,9 @@ export const addToCart = async (req, res) => {
       });
     }
 
+    const safeCustomizationIds = normalizeIds(customizationIds);
+    const safeAddonIds = normalizeIds(addonIds);
+
     const menuItem = await prisma.menuItem.findUnique({
       where: { id: menuItemId },
       include: {
@@ -252,6 +328,13 @@ export const addToCart = async (req, res) => {
       return res.status(404).json({
         success: false,
         message: "Menu item not available",
+      });
+    }
+
+    if (!menuItem.restaurant) {
+      return res.status(404).json({
+        success: false,
+        message: "Restaurant not found",
       });
     }
 
@@ -288,23 +371,33 @@ export const addToCart = async (req, res) => {
     const pricing = await calculateItemPricing({
       menuItem,
       quantity,
-      customizationIds: normalizeIds(customizationIds),
-      addonIds: normalizeIds(addonIds),
+      customizationIds: safeCustomizationIds,
+      addonIds: safeAddonIds,
     });
 
-    const existingItem = await prisma.cartItem.findUnique({
-      where: {
-        userId_menuItemId: {
-          userId: req.user.id,
-          menuItemId,
-        },
-      },
-    });
+    if (pricing.error) {
+      return res.status(pricing.status || 400).json({
+        success: false,
+        message: pricing.message,
+        invalidCustomizationIds: pricing.invalidCustomizationIds || [],
+        invalidAddonIds: pricing.invalidAddonIds || [],
+      });
+    }
+
+    const existingItem = existingCart.find(item =>
+      isSameCartConfiguration({
+        cartItem: item,
+        menuItemId,
+        customizationIds: safeCustomizationIds,
+        addonIds: safeAddonIds,
+      })
+    );
 
     let cartItem;
 
     if (existingItem) {
-      const newQuantity = Number(existingItem.quantity || 0) + pricing.safeQuantity;
+      const newQuantity =
+        Number(existingItem.quantity || 0) + pricing.safeQuantity;
 
       cartItem = await prisma.cartItem.update({
         where: { id: existingItem.id },
@@ -341,11 +434,18 @@ export const addToCart = async (req, res) => {
       });
     }
 
+    const { cartItems, summary, pricing: cartPricing } = await getCartPayload(
+      req.user.id
+    );
+
     return res.status(201).json({
       success: true,
       message: "Item added to cart",
       data: cartItem,
       cartItem,
+      cartItems,
+      pricing: cartPricing,
+      ...summary,
     });
   } catch (error) {
     console.error("Add Cart Error:", error);
@@ -377,7 +477,12 @@ export const updateCartItem = async (req, res) => {
         userId: req.user.id,
       },
       include: {
-        menuItem: true,
+        menuItem: {
+          include: {
+            restaurant: true,
+          },
+        },
+        restaurant: true,
       },
     });
 
@@ -385,6 +490,20 @@ export const updateCartItem = async (req, res) => {
       return res.status(404).json({
         success: false,
         message: "Cart item not found",
+      });
+    }
+
+    if (!cartItem.menuItem || !cartItem.menuItem.isAvailable) {
+      return res.status(400).json({
+        success: false,
+        message: "Menu item is no longer available",
+      });
+    }
+
+    if (!cartItem.menuItem.restaurant?.isOpen) {
+      return res.status(400).json({
+        success: false,
+        message: "Store is currently closed",
       });
     }
 
@@ -396,16 +515,29 @@ export const updateCartItem = async (req, res) => {
       ? cartItem.addonJson.map(item => item.id).filter(Boolean)
       : [];
 
+    const finalCustomizationIds =
+      customizationIds !== undefined
+        ? normalizeIds(customizationIds)
+        : normalizeIds(oldCustomizationIds);
+
+    const finalAddonIds =
+      addonIds !== undefined ? normalizeIds(addonIds) : normalizeIds(oldAddonIds);
+
     const pricing = await calculateItemPricing({
       menuItem: cartItem.menuItem,
       quantity: safeQuantity,
-      customizationIds:
-        customizationIds !== undefined
-          ? normalizeIds(customizationIds)
-          : oldCustomizationIds,
-      addonIds:
-        addonIds !== undefined ? normalizeIds(addonIds) : oldAddonIds,
+      customizationIds: finalCustomizationIds,
+      addonIds: finalAddonIds,
     });
+
+    if (pricing.error) {
+      return res.status(pricing.status || 400).json({
+        success: false,
+        message: pricing.message,
+        invalidCustomizationIds: pricing.invalidCustomizationIds || [],
+        invalidAddonIds: pricing.invalidAddonIds || [],
+      });
+    }
 
     const updatedCart = await prisma.cartItem.update({
       where: { id },
@@ -423,11 +555,18 @@ export const updateCartItem = async (req, res) => {
       },
     });
 
+    const { cartItems, summary, pricing: cartPricing } = await getCartPayload(
+      req.user.id
+    );
+
     return res.json({
       success: true,
       message: "Cart updated",
       data: updatedCart,
       cartItem: updatedCart,
+      cartItems,
+      pricing: cartPricing,
+      ...summary,
     });
   } catch (error) {
     console.error("Update Cart Error:", error);
@@ -461,10 +600,16 @@ export const removeCartItem = async (req, res) => {
       where: { id },
     });
 
+    const { cartItems, summary, pricing } = await getCartPayload(req.user.id);
+
     return res.json({
       success: true,
       message: "Item removed",
       data: { id },
+      removedId: id,
+      cartItems,
+      pricing,
+      ...summary,
     });
   } catch (error) {
     console.error("Remove Cart Error:", error);
@@ -482,10 +627,16 @@ export const clearCart = async (req, res) => {
       where: { userId: req.user.id },
     });
 
+    const pricing = calculateCartPricingFromItems([]);
+    const summary = getCartSummary([]);
+
     return res.json({
       success: true,
       message: "Cart cleared",
       data: true,
+      cartItems: [],
+      pricing,
+      ...summary,
     });
   } catch (error) {
     console.error("Clear Cart Error:", error);

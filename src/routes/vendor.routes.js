@@ -7,7 +7,6 @@ import {
   getCategories,
 
   getVendorDashboard,
-
   getVendorOrders,
   updateVendorOrderStatus,
   updatePreparationTime,
@@ -18,6 +17,7 @@ import {
   getVendorMenu,
   createVendorMenuItem,
   updateVendorMenuItem,
+  toggleVendorMenuItemAvailability,
   deleteVendorMenuItem,
 
   getVendorCategories,
@@ -25,191 +25,73 @@ import {
   updateVendorCategory,
   deleteVendorCategory,
 
+  getVendorProfile,
   updateVendorSettings,
+  toggleVendorOpenClose,
   setVendorBusyMode,
 
   getVendorPayments,
   getVendorEarningsGraph,
+  getVendorNotifications,
 } from "../controllers/vendor.controllers.js";
 
 const router = express.Router();
 
-/* =========================
-   PUBLIC USER APIs
-========================= */
+const vendorAccess = [protect, allowRoles("VENDOR", "ADMIN")];
 
+/* PUBLIC */
 router.get("/", getVendors);
 router.get("/categories/list", getCategories);
 
-/* =========================
-   VENDOR DASHBOARD APIs
-========================= */
+/* DASHBOARD */
+router.get("/dashboard/me", vendorAccess, getVendorDashboard);
 
-router.get(
-  "/dashboard/me",
-  protect,
-  allowRoles("VENDOR", "ADMIN"),
-  getVendorDashboard
-);
-
-/* =========================
-   VENDOR ORDERS APIs
-========================= */
-
-router.get(
-  "/orders/me",
-  protect,
-  allowRoles("VENDOR", "ADMIN"),
-  getVendorOrders
-);
-
-router.patch(
-  "/orders/:id/status",
-  protect,
-  allowRoles("VENDOR", "ADMIN"),
-  updateVendorOrderStatus
-);
-
+/* ORDERS */
+router.get("/orders/me", vendorAccess, getVendorOrders);
+router.patch("/orders/:id/status", vendorAccess, updateVendorOrderStatus);
 router.patch(
   "/orders/:id/preparation-time",
-  protect,
-  allowRoles("VENDOR", "ADMIN"),
+  vendorAccess,
   updatePreparationTime
 );
 
-/* =========================
-   VENDOR RIDER APIs
-========================= */
+/* RIDERS */
+router.get("/riders/available", vendorAccess, getAvailableRidersForVendor);
+router.patch("/orders/:id/assign-rider", vendorAccess, assignVendorOrderRider);
+router.patch("/orders/:id/reassign-rider", vendorAccess, assignVendorOrderRider);
 
-router.get(
-  "/riders/available",
-  protect,
-  allowRoles("VENDOR", "ADMIN"),
-  getAvailableRidersForVendor
-);
-
+/* MENU */
+router.get("/menu", vendorAccess, getVendorMenu);
+router.post("/menu", vendorAccess, createVendorMenuItem);
+router.patch("/menu/:id", vendorAccess, updateVendorMenuItem);
 router.patch(
-  "/orders/:id/assign-rider",
-  protect,
-  allowRoles("VENDOR", "ADMIN"),
-  assignVendorOrderRider
+  "/menu/:id/availability",
+  vendorAccess,
+  toggleVendorMenuItemAvailability
 );
+router.delete("/menu/:id", vendorAccess, deleteVendorMenuItem);
 
-/* =========================
-   VENDOR MENU APIs
-========================= */
+/* VENDOR CATEGORIES */
+router.get("/categories", vendorAccess, getVendorCategories);
+router.post("/categories", vendorAccess, createVendorCategory);
+router.patch("/categories/:id", vendorAccess, updateVendorCategory);
+router.delete("/categories/:id", vendorAccess, deleteVendorCategory);
 
-router.get(
-  "/menu",
-  protect,
-  allowRoles("VENDOR", "ADMIN"),
-  getVendorMenu
-);
+/* PROFILE / SETTINGS */
+router.get("/profile/me", vendorAccess, getVendorProfile);
+router.patch("/settings/me", vendorAccess, updateVendorSettings);
+router.patch("/settings/open-close", vendorAccess, toggleVendorOpenClose);
+router.patch("/settings/busy-mode", vendorAccess, setVendorBusyMode);
+router.patch("/settings/:id", vendorAccess, updateVendorSettings);
 
-router.post(
-  "/menu",
-  protect,
-  allowRoles("VENDOR", "ADMIN"),
-  createVendorMenuItem
-);
+/* PAYMENTS / ANALYTICS */
+router.get("/payments/me", vendorAccess, getVendorPayments);
+router.get("/earnings/graph", vendorAccess, getVendorEarningsGraph);
 
-router.patch(
-  "/menu/:id",
-  protect,
-  allowRoles("VENDOR", "ADMIN"),
-  updateVendorMenuItem
-);
+/* NOTIFICATIONS */
+router.get("/notifications", vendorAccess, getVendorNotifications);
 
-router.delete(
-  "/menu/:id",
-  protect,
-  allowRoles("VENDOR", "ADMIN"),
-  deleteVendorMenuItem
-);
-
-/* =========================
-   VENDOR INTERNAL CATEGORY APIs
-========================= */
-
-router.get(
-  "/categories",
-  protect,
-  allowRoles("VENDOR", "ADMIN"),
-  getVendorCategories
-);
-
-router.post(
-  "/categories",
-  protect,
-  allowRoles("VENDOR", "ADMIN"),
-  createVendorCategory
-);
-
-router.patch(
-  "/categories/:id",
-  protect,
-  allowRoles("VENDOR", "ADMIN"),
-  updateVendorCategory
-);
-
-router.delete(
-  "/categories/:id",
-  protect,
-  allowRoles("VENDOR", "ADMIN"),
-  deleteVendorCategory
-);
-
-/* =========================
-   VENDOR SETTINGS APIs
-========================= */
-
-router.patch(
-  "/settings/me",
-  protect,
-  allowRoles("VENDOR", "ADMIN"),
-  updateVendorSettings
-);
-
-router.patch(
-  "/settings/busy-mode",
-  protect,
-  allowRoles("VENDOR", "ADMIN"),
-  setVendorBusyMode
-);
-
-router.patch(
-  "/settings/:id",
-  protect,
-  allowRoles("VENDOR", "ADMIN"),
-  updateVendorSettings
-);
-
-/* =========================
-   VENDOR PAYMENTS APIs
-========================= */
-
-router.get(
-  "/payments/me",
-  protect,
-  allowRoles("VENDOR", "ADMIN"),
-  getVendorPayments
-);
-
-/* =========================
-   VENDOR GRAPH APIs
-========================= */
-
-router.get(
-  "/earnings/graph",
-  protect,
-  allowRoles("VENDOR", "ADMIN"),
-  getVendorEarningsGraph
-);
-
-/* =========================
-   SINGLE VENDOR - KEEP LAST
-========================= */
-
+/* KEEP LAST */
 router.get("/:id", getVendorById);
 
 export default router;

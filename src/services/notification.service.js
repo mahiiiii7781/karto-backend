@@ -7,9 +7,11 @@ try {
   if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
     const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
 
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount),
-    });
+    if (!admin.apps.length) {
+      admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount),
+      });
+    }
 
     firebaseReady = true;
     console.log("Firebase initialized");
@@ -20,6 +22,15 @@ try {
   console.error("Firebase Init Error:", error.message);
 }
 
+const stringifyData = (data = {}) => {
+  return Object.fromEntries(
+    Object.entries(data || {}).map(([key, value]) => [
+      key,
+      value === null || value === undefined ? "" : String(value),
+    ])
+  );
+};
+
 export const saveNotification = async ({
   userId,
   type = "SYSTEM",
@@ -27,6 +38,8 @@ export const saveNotification = async ({
   body,
   data = {},
 }) => {
+  if (!userId || !title || !body) return null;
+
   return prisma.notification.create({
     data: {
       userId,
@@ -34,6 +47,7 @@ export const saveNotification = async ({
       title,
       body,
       data,
+      isRead: false,
     },
   });
 };
@@ -44,14 +58,19 @@ export const sendPushToUser = async ({
   title,
   body,
   data = {},
+  saveToDb = true,
 }) => {
-  await saveNotification({
-    userId,
-    type,
-    title,
-    body,
-    data,
-  });
+  let notification = null;
+
+  if (saveToDb) {
+    notification = await saveNotification({
+      userId,
+      type,
+      title,
+      body,
+      data,
+    });
+  }
 
   const tokens = await prisma.pushToken.findMany({
     where: {
@@ -64,6 +83,9 @@ export const sendPushToUser = async ({
     return {
       success: false,
       message: "Notification saved, push not sent",
+      notification,
+      sent: 0,
+      failed: 0,
     };
   }
 
@@ -72,19 +94,22 @@ export const sendPushToUser = async ({
       title,
       body,
     },
-    data: Object.fromEntries(
-      Object.entries(data || {}).map(([key, value]) => [key, String(value)])
-    ),
-    tokens: tokens.map(t => t.token),
+    data: stringifyData({
+      ...data,
+      notificationId: notification?.id || "",
+      type,
+    }),
+    tokens: tokens.map((t) => t.token),
   };
 
   const response = await admin.messaging().sendEachForMulticast(payload);
 
   const failedTokens = [];
 
-  response.responses.forEach((res, index) => {
-    if (!res.success) {
+  response.responses.forEach((result, index) => {
+    if (!result.success) {
       failedTokens.push(tokens[index].token);
+      console.warn("Push send failed:", result.error?.message);
     }
   });
 
@@ -100,14 +125,15 @@ export const sendPushToUser = async ({
   }
 
   return {
-    success: true,
+    success: response.successCount > 0,
+    notification,
     sent: response.successCount,
     failed: response.failureCount,
   };
 };
 
 export const notificationTemplates = {
-  ORDER_PLACED_VENDOR: restaurantName => ({
+  ORDER_PLACED_VENDOR: (restaurantName) => ({
     title: "New order received 🛎️",
     body: `A fresh order just came in for ${restaurantName}. Please accept it quickly.`,
   }),
@@ -117,7 +143,7 @@ export const notificationTemplates = {
     body: "Your order is received. The store will start preparing it soon.",
   }),
 
-  ORDER_ACCEPTED_CUSTOMER: restaurantName => ({
+  ORDER_ACCEPTED_CUSTOMER: (restaurantName) => ({
     title: "Order accepted ✅",
     body: `${restaurantName} accepted your order. Fresh food is on the way soon.`,
   }),
@@ -150,5 +176,20 @@ export const notificationTemplates = {
   ORDER_CANCELLED_CUSTOMER: () => ({
     title: "Order cancelled",
     body: "Your order has been cancelled. Any eligible refund will be processed soon.",
+  }),
+
+  RIDER_ASSIGNED_CUSTOMER: (riderName = "Your rider") => ({
+    title: "Rider assigned 🛵",
+    body: `${riderName} will pick up your order soon.`,
+  }),
+
+  PAYMENT_SUCCESS_CUSTOMER: () => ({
+    title: "Payment successful ✅",
+    body: "Your payment is confirmed. Your order is being processed.",
+  }),
+
+  PAYMENT_FAILED_CUSTOMER: () => ({
+    title: "Payment failed",
+    body: "Your payment could not be completed. Please try again.",
   }),
 };

@@ -1,8 +1,7 @@
 import prisma from "../prisma.js";
 import { getIO } from "../socket.js";
 
-const couponCode = () =>
-  "KARTO-RIDER-" + Math.random().toString(36).substring(2, 8).toUpperCase();
+const amountNumber = (v) => Number(v || 0);
 
 const todayStart = () => {
   const d = new Date();
@@ -10,16 +9,176 @@ const todayStart = () => {
   return d;
 };
 
-const amountNumber = (v) => Number(v || 0);
+const weekStart = () => {
+  const d = new Date();
+  const day = d.getDay();
+  d.setDate(d.getDate() - day);
+  d.setHours(0, 0, 0, 0);
+  return d;
+};
+
+const monthStart = () => {
+  const d = new Date();
+  d.setDate(1);
+  d.setHours(0, 0, 0, 0);
+  return d;
+};
+
+const couponCode = () =>
+  "KARTO-RIDER-" + Math.random().toString(36).substring(2, 8).toUpperCase();
 
 const getRiderEarningAmount = (order) => amountNumber(order.deliveryFee);
 
 const orderInclude = {
-  user: { select: { id: true, fullName: true, phone: true, avatarUrl: true } },
-  restaurant: true,
+  user: {
+    select: {
+      id: true,
+      fullName: true,
+      phone: true,
+      avatarUrl: true,
+    },
+  },
+  restaurant: {
+    select: {
+      id: true,
+      name: true,
+      ownerName: true,
+      ownerMobileNo: true,
+      phone: true,
+      email: true,
+      address: true,
+      latitude: true,
+      longitude: true,
+      imageUrl: true,
+      deliveryTime: true,
+    },
+  },
   address: true,
   items: true,
-  history: { orderBy: { createdAt: "desc" } },
+  history: {
+    orderBy: { createdAt: "desc" },
+  },
+};
+
+const cleanOrder = (order) => {
+  if (!order) return null;
+
+  return {
+    ...order,
+    totalAmount: amountNumber(order.totalAmount),
+    itemTotal: amountNumber(order.itemTotal),
+    deliveryFee: amountNumber(order.deliveryFee),
+    distanceKm: order.distanceKm ? amountNumber(order.distanceKm) : null,
+    discount: amountNumber(order.discount),
+    taxAmount: amountNumber(order.taxAmount),
+    customer: order.user
+      ? {
+          id: order.user.id,
+          name: order.user.fullName,
+          phone: order.user.phone,
+          avatarUrl: order.user.avatarUrl,
+        }
+      : null,
+    vendor: order.restaurant
+      ? {
+          id: order.restaurant.id,
+          name: order.restaurant.name,
+          ownerName: order.restaurant.ownerName,
+          phone: order.restaurant.phone || order.restaurant.ownerMobileNo,
+          address: order.restaurant.address,
+          latitude: order.restaurant.latitude,
+          longitude: order.restaurant.longitude,
+          imageUrl: order.restaurant.imageUrl,
+        }
+      : null,
+    deliveryAddress: order.address || null,
+    pickupAddress: order.restaurant?.address || null,
+  };
+};
+
+const emitOrderUpdate = (orderId, event, payload) => {
+  const io = getIO();
+  if (!io) return;
+
+  io.to(`order-${orderId}`).emit("order-updated", payload);
+  io.emit(event, payload);
+};
+
+export const getRiderDashboard = async (req, res) => {
+  try {
+    const riderId = req.user.id;
+
+    const [rider, wallet, todayEarnings, activeOrders, deliveredCount] =
+      await Promise.all([
+        prisma.user.findUnique({
+          where: { id: riderId },
+          select: {
+            id: true,
+            fullName: true,
+            phone: true,
+            avatarUrl: true,
+            isOnline: true,
+            kycStatus: true,
+            vehicleNo: true,
+            vehicleType: true,
+          },
+        }),
+        prisma.riderWallet.upsert({
+          where: { riderId },
+          update: {},
+          create: { riderId },
+        }),
+        prisma.riderEarning.findMany({
+          where: {
+            riderId,
+            createdAt: { gte: todayStart() },
+          },
+        }),
+        prisma.order.findMany({
+          where: {
+            riderId,
+            status: {
+              in: ["ASSIGNED_TO_RIDER", "PICKED_UP", "OUT_FOR_DELIVERY"],
+            },
+          },
+          include: orderInclude,
+          orderBy: { updatedAt: "desc" },
+        }),
+        prisma.order.count({
+          where: {
+            riderId,
+            status: "DELIVERED",
+          },
+        }),
+      ]);
+
+    const todayEarning = todayEarnings.reduce(
+      (sum, x) => sum + amountNumber(x.amount),
+      0
+    );
+
+    res.json({
+      success: true,
+      dashboard: {
+        rider,
+        stats: {
+          todayEarnings: todayEarning,
+          totalEarnings: amountNumber(wallet.totalEarn),
+          walletBalance: amountNumber(wallet.balance),
+          activeOrders: activeOrders.length,
+          todayOrders: todayEarnings.length,
+          deliveredOrders: deliveredCount,
+        },
+        activeOrder: activeOrders[0] ? cleanOrder(activeOrders[0]) : null,
+      },
+    });
+  } catch (error) {
+    console.error("Rider Dashboard Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch rider dashboard",
+    });
+  }
 };
 
 export const updateOnlineStatus = async (req, res) => {
@@ -50,22 +209,116 @@ export const updateOnlineStatus = async (req, res) => {
     });
   } catch (error) {
     console.error("Rider Online Status Error:", error);
-    res.status(500).json({ success: false, message: "Failed to update status" });
+    res.status(500).json({
+      success: false,
+      message: "Failed to update status",
+    });
+  }
+};
+
+export const getCurrentAssignment = async (req, res) => {
+  try {
+    const riderId = req.user.id;
+
+    const rider = await prisma.user.findUnique({
+      where: { id: riderId },
+      select: {
+        isOnline: true,
+        kycStatus: true,
+        isActive: true,
+      },
+    });
+
+    if (!rider?.isActive) {
+      return res.status(403).json({
+        success: false,
+        message: "Rider account is inactive",
+      });
+    }
+
+    if (!rider.isOnline) {
+      return res.json({
+        success: true,
+        hasAssignment: false,
+        message: "Go online to receive orders",
+        order: null,
+      });
+    }
+
+    if (rider.kycStatus !== "APPROVED") {
+      return res.json({
+        success: true,
+        hasAssignment: false,
+        message: "KYC approval required",
+        order: null,
+      });
+    }
+
+    const activeOrder = await prisma.order.findFirst({
+      where: {
+        riderId,
+        status: {
+          in: ["ASSIGNED_TO_RIDER", "PICKED_UP", "OUT_FOR_DELIVERY"],
+        },
+      },
+      include: orderInclude,
+      orderBy: { updatedAt: "desc" },
+    });
+
+    if (activeOrder) {
+      return res.json({
+        success: true,
+        hasAssignment: false,
+        activeOrder: cleanOrder(activeOrder),
+        order: null,
+      });
+    }
+
+    const order = await prisma.order.findFirst({
+      where: {
+        riderId: null,
+        status: "READY_FOR_PICKUP",
+      },
+      include: orderInclude,
+      orderBy: { readyAt: "asc" },
+    });
+
+    res.json({
+      success: true,
+      hasAssignment: Boolean(order),
+      order: cleanOrder(order),
+    });
+  } catch (error) {
+    console.error("Current Assignment Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch current assignment",
+    });
   }
 };
 
 export const getNewOrders = async (req, res) => {
   try {
     const orders = await prisma.order.findMany({
-      where: { riderId: null, status: "READY_FOR_PICKUP" },
+      where: {
+        riderId: null,
+        status: "READY_FOR_PICKUP",
+      },
       include: orderInclude,
-      orderBy: { createdAt: "desc" },
+      orderBy: { readyAt: "asc" },
+      take: 20,
     });
 
-    res.json({ success: true, orders });
+    res.json({
+      success: true,
+      orders: orders.map(cleanOrder),
+    });
   } catch (error) {
     console.error("Get New Orders Error:", error);
-    res.status(500).json({ success: false, message: "Failed to fetch orders" });
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch orders",
+    });
   }
 };
 
@@ -76,16 +329,24 @@ export const getActiveOrders = async (req, res) => {
     const orders = await prisma.order.findMany({
       where: {
         riderId,
-        status: { in: ["ASSIGNED_TO_RIDER", "PICKED_UP", "OUT_FOR_DELIVERY"] },
+        status: {
+          in: ["ASSIGNED_TO_RIDER", "PICKED_UP", "OUT_FOR_DELIVERY"],
+        },
       },
       include: orderInclude,
       orderBy: { updatedAt: "desc" },
     });
 
-    res.json({ success: true, orders });
+    res.json({
+      success: true,
+      orders: orders.map(cleanOrder),
+    });
   } catch (error) {
     console.error("Get Active Orders Error:", error);
-    res.status(500).json({ success: false, message: "Failed to fetch active orders" });
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch active orders",
+    });
   }
 };
 
@@ -97,19 +358,34 @@ export const getOrderDetail = async (req, res) => {
     const order = await prisma.order.findFirst({
       where: {
         id,
-        OR: [{ riderId }, { riderId: null, status: "READY_FOR_PICKUP" }],
+        OR: [
+          { riderId },
+          {
+            riderId: null,
+            status: "READY_FOR_PICKUP",
+          },
+        ],
       },
       include: orderInclude,
     });
 
     if (!order) {
-      return res.status(404).json({ success: false, message: "Order not found" });
+      return res.status(404).json({
+        success: false,
+        message: "Order not found",
+      });
     }
 
-    res.json({ success: true, order });
+    res.json({
+      success: true,
+      order: cleanOrder(order),
+    });
   } catch (error) {
     console.error("Get Order Detail Error:", error);
-    res.status(500).json({ success: false, message: "Failed to fetch order detail" });
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch order detail",
+    });
   }
 };
 
@@ -120,55 +396,130 @@ export const acceptOrder = async (req, res) => {
 
     const rider = await prisma.user.findUnique({
       where: { id: riderId },
-      select: { isOnline: true, kycStatus: true },
+      select: {
+        isOnline: true,
+        kycStatus: true,
+        isActive: true,
+      },
     });
 
-    if (!rider?.isOnline) {
-      return res.status(400).json({ success: false, message: "Go online first" });
+    if (!rider?.isActive) {
+      return res.status(403).json({
+        success: false,
+        message: "Rider account is inactive",
+      });
+    }
+
+    if (!rider.isOnline) {
+      return res.status(400).json({
+        success: false,
+        message: "Go online first",
+      });
     }
 
     if (rider.kycStatus !== "APPROVED") {
-      return res.status(400).json({ success: false, message: "KYC approval required" });
+      return res.status(400).json({
+        success: false,
+        message: "KYC approval required",
+      });
     }
 
-    const order = await prisma.order.findFirst({
-      where: { id, riderId: null, status: "READY_FOR_PICKUP" },
-    });
-
-    if (!order) {
-      return res.status(400).json({ success: false, message: "Order is not available" });
-    }
-
-    const updatedOrder = await prisma.order.update({
-      where: { id },
-      data: {
+    const alreadyActive = await prisma.order.findFirst({
+      where: {
         riderId,
-        status: "ASSIGNED_TO_RIDER",
-        acceptedAt: new Date(),
-        history: {
-          create: {
-            status: "ASSIGNED_TO_RIDER",
-            changedBy: riderId,
-            note: "Order accepted by rider",
-          },
+        status: {
+          in: ["ASSIGNED_TO_RIDER", "PICKED_UP", "OUT_FOR_DELIVERY"],
         },
       },
-      include: orderInclude,
     });
 
-    getIO()?.to(`order-${id}`).emit("order-updated", updatedOrder);
-    getIO()?.to(`rider-${riderId}`).emit("order-accepted", updatedOrder);
+    if (alreadyActive) {
+      return res.status(400).json({
+        success: false,
+        message: "Complete your active order first",
+      });
+    }
 
-    res.json({ success: true, message: "Order accepted", order: updatedOrder });
+    const result = await prisma.$transaction(async (tx) => {
+      const order = await tx.order.findFirst({
+        where: {
+          id,
+          riderId: null,
+          status: "READY_FOR_PICKUP",
+        },
+      });
+
+      if (!order) {
+        throw new Error("Order is not available");
+      }
+
+      return tx.order.update({
+        where: { id },
+        data: {
+          riderId,
+          status: "ASSIGNED_TO_RIDER",
+          acceptedAt: new Date(),
+          history: {
+            create: {
+              status: "ASSIGNED_TO_RIDER",
+              changedBy: riderId,
+              note: "Order accepted by rider",
+            },
+          },
+        },
+        include: orderInclude,
+      });
+    });
+
+    const finalOrder = cleanOrder(result);
+
+    getIO()?.to(`order-${id}`).emit("order-updated", finalOrder);
+    getIO()?.to(`rider-${riderId}`).emit("order-accepted", finalOrder);
+    getIO()?.emit("rider-order-accepted", finalOrder);
+
+    res.json({
+      success: true,
+      message: "Order accepted",
+      order: finalOrder,
+    });
   } catch (error) {
     console.error("Accept Order Error:", error);
-    res.status(500).json({ success: false, message: "Accept failed" });
+
+    res.status(error.message === "Order is not available" ? 400 : 500).json({
+      success: false,
+      message: error.message || "Accept failed",
+    });
   }
 };
 
 export const rejectOrder = async (req, res) => {
   try {
+    const riderId = req.user.id;
     const { id } = req.params;
+
+    const order = await prisma.order.findFirst({
+      where: {
+        id,
+        riderId: null,
+        status: "READY_FOR_PICKUP",
+      },
+      select: {
+        id: true,
+        orderNumber: true,
+      },
+    });
+
+    if (!order) {
+      return res.status(400).json({
+        success: false,
+        message: "Order is no longer available",
+      });
+    }
+
+    getIO()?.to(`rider-${riderId}`).emit("order-rejected", {
+      orderId: id,
+      riderId,
+    });
 
     res.json({
       success: true,
@@ -177,7 +528,10 @@ export const rejectOrder = async (req, res) => {
     });
   } catch (error) {
     console.error("Reject Order Error:", error);
-    res.status(500).json({ success: false, message: "Reject failed" });
+    res.status(500).json({
+      success: false,
+      message: "Reject failed",
+    });
   }
 };
 
@@ -187,11 +541,18 @@ export const markPicked = async (req, res) => {
     const { id } = req.params;
 
     const order = await prisma.order.findFirst({
-      where: { id, riderId, status: "ASSIGNED_TO_RIDER" },
+      where: {
+        id,
+        riderId,
+        status: "ASSIGNED_TO_RIDER",
+      },
     });
 
     if (!order) {
-      return res.status(400).json({ success: false, message: "Order not found or already picked" });
+      return res.status(400).json({
+        success: false,
+        message: "Order not found or already picked",
+      });
     }
 
     const updatedOrder = await prisma.order.update({
@@ -210,13 +571,22 @@ export const markPicked = async (req, res) => {
       include: orderInclude,
     });
 
-    getIO()?.to(`order-${id}`).emit("order-updated", updatedOrder);
-    getIO()?.to(`rider-${riderId}`).emit("order-picked", updatedOrder);
+    const finalOrder = cleanOrder(updatedOrder);
 
-    res.json({ success: true, message: "Order picked", order: updatedOrder });
+    emitOrderUpdate(id, "order-picked", finalOrder);
+    getIO()?.to(`rider-${riderId}`).emit("order-picked", finalOrder);
+
+    res.json({
+      success: true,
+      message: "Order picked",
+      order: finalOrder,
+    });
   } catch (error) {
     console.error("Picked Error:", error);
-    res.status(500).json({ success: false, message: "Pick failed" });
+    res.status(500).json({
+      success: false,
+      message: "Pick failed",
+    });
   }
 };
 
@@ -226,11 +596,18 @@ export const startDelivery = async (req, res) => {
     const { id } = req.params;
 
     const order = await prisma.order.findFirst({
-      where: { id, riderId, status: "PICKED_UP" },
+      where: {
+        id,
+        riderId,
+        status: "PICKED_UP",
+      },
     });
 
     if (!order) {
-      return res.status(400).json({ success: false, message: "Order not found or not picked" });
+      return res.status(400).json({
+        success: false,
+        message: "Order not found or not picked",
+      });
     }
 
     const updatedOrder = await prisma.order.update({
@@ -248,13 +625,22 @@ export const startDelivery = async (req, res) => {
       include: orderInclude,
     });
 
-    getIO()?.to(`order-${id}`).emit("order-updated", updatedOrder);
-    getIO()?.to(`rider-${riderId}`).emit("delivery-started", updatedOrder);
+    const finalOrder = cleanOrder(updatedOrder);
 
-    res.json({ success: true, message: "Delivery started", order: updatedOrder });
+    emitOrderUpdate(id, "delivery-started", finalOrder);
+    getIO()?.to(`rider-${riderId}`).emit("delivery-started", finalOrder);
+
+    res.json({
+      success: true,
+      message: "Delivery started",
+      order: finalOrder,
+    });
   } catch (error) {
     console.error("Start Delivery Error:", error);
-    res.status(500).json({ success: false, message: "Start delivery failed" });
+    res.status(500).json({
+      success: false,
+      message: "Start delivery failed",
+    });
   }
 };
 
@@ -267,12 +653,17 @@ export const completeOrder = async (req, res) => {
       where: {
         id,
         riderId,
-        status: { in: ["PICKED_UP", "OUT_FOR_DELIVERY"] },
+        status: {
+          in: ["PICKED_UP", "OUT_FOR_DELIVERY"],
+        },
       },
     });
 
     if (!order) {
-      return res.status(400).json({ success: false, message: "Order not found or not picked" });
+      return res.status(400).json({
+        success: false,
+        message: "Order not found or not ready for delivery completion",
+      });
     }
 
     const earningAmount = getRiderEarningAmount(order);
@@ -284,7 +675,8 @@ export const completeOrder = async (req, res) => {
         data: {
           status: "DELIVERED",
           deliveredAt: new Date(),
-          paymentStatus: order.paymentMethod === "COD" ? "PAID" : order.paymentStatus,
+          paymentStatus:
+            order.paymentMethod === "COD" ? "PAID" : order.paymentStatus,
           history: {
             create: {
               status: "DELIVERED",
@@ -343,31 +735,225 @@ export const completeOrder = async (req, res) => {
         },
       });
 
-      return { updatedOrder, earning, wallet, coupon };
+      return {
+        updatedOrder,
+        earning,
+        wallet,
+        coupon,
+      };
     });
 
-    getIO()?.to(`order-${id}`).emit("order-updated", result.updatedOrder);
+    const finalOrder = cleanOrder(result.updatedOrder);
+
+    getIO()?.to(`order-${id}`).emit("order-updated", finalOrder);
     getIO()?.to(`rider-${riderId}`).emit("order-completed", {
       orderId: order.id,
+      order: finalOrder,
       earning: result.earning,
       coupon: result.coupon,
       wallet: result.wallet,
     });
+    getIO()?.emit("order-delivered", finalOrder);
 
     res.json({
       success: true,
       message: "Order delivered successfully",
-      order: result.updatedOrder,
+      order: finalOrder,
       earning: result.earning,
       wallet: result.wallet,
       coupon: result.coupon,
     });
   } catch (error) {
     console.error("Complete Order Error:", error);
-    res.status(500).json({ success: false, message: "Complete failed" });
+    res.status(500).json({
+      success: false,
+      message: "Complete failed",
+    });
   }
 };
+export const verifyDeliveryOtp = async (req, res) => {
+  try {
+    const riderId = req.user.id;
+    const { id } = req.params;
+    const { otp } = req.body;
 
+    if (!otp) {
+      return res.status(400).json({
+        success: false,
+        message: "OTP is required",
+      });
+    }
+
+    const order = await prisma.order.findFirst({
+      where: {
+        id,
+        riderId,
+        status: {
+          in: ["PICKED_UP", "OUT_FOR_DELIVERY"],
+        },
+      },
+    });
+
+    if (!order) {
+      return res.status(400).json({
+        success: false,
+        message: "Order not found or delivery not started",
+      });
+    }
+
+    if (order.deliveryOtpVerified) {
+      return res.json({
+        success: true,
+        message: "Delivery already verified",
+      });
+    }
+
+    if (!order.deliveryOtp) {
+      return res.status(400).json({
+        success: false,
+        message: "Delivery OTP not found",
+      });
+    }
+
+    if (
+      order.deliveryOtpExpiresAt &&
+      new Date(order.deliveryOtpExpiresAt) < new Date()
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Delivery OTP expired",
+      });
+    }
+
+    if (String(order.deliveryOtp) !== String(otp).trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid OTP",
+      });
+    }
+
+    const earningAmount = getRiderEarningAmount(order);
+    const code = couponCode();
+
+    const result = await prisma.$transaction(async (tx) => {
+      const updatedOrder = await tx.order.update({
+        where: { id },
+        data: {
+          deliveryOtpVerified: true,
+          status: "DELIVERED",
+          deliveredAt: new Date(),
+          paymentStatus:
+            order.paymentMethod === "COD" ? "PAID" : order.paymentStatus,
+          history: {
+            create: {
+              status: "DELIVERED",
+              changedBy: riderId,
+              note: "Order delivered after customer OTP verification",
+            },
+          },
+        },
+        include: orderInclude,
+      });
+
+      const earning = await tx.riderEarning.create({
+        data: {
+          riderId,
+          orderId: order.id,
+          amount: earningAmount,
+          note: `Earning from order ${order.orderNumber}`,
+        },
+      });
+
+      const wallet = await tx.riderWallet.upsert({
+        where: { riderId },
+        update: {
+          balance: { increment: earningAmount },
+          todayEarn: { increment: earningAmount },
+          totalEarn: { increment: earningAmount },
+        },
+        create: {
+          riderId,
+          balance: earningAmount,
+          todayEarn: earningAmount,
+          totalEarn: earningAmount,
+        },
+      });
+
+      const coupon = await tx.riderCoupon.create({
+        data: {
+          riderId,
+          orderId: order.id,
+          code,
+          title: "Delivery Earning Coupon",
+          amount: earningAmount,
+          message: `Congratulations! You earned ₹${earningAmount} from order ${order.orderNumber}.`,
+        },
+      });
+
+      await tx.riderIncentive.updateMany({
+        where: {
+          riderId,
+          isCompleted: false,
+          startDate: { lte: new Date() },
+          endDate: { gte: new Date() },
+        },
+        data: {
+          completedOrders: { increment: 1 },
+        },
+      });
+
+      const existingSettlement = await tx.riderSettlement.findFirst({
+        where: { orderId: order.id },
+      });
+
+      if (!existingSettlement) {
+        await tx.riderSettlement.create({
+          data: {
+            riderId,
+            orderId: order.id,
+            amount: earningAmount,
+            status: "PENDING",
+          },
+        });
+      }
+
+      return {
+        updatedOrder,
+        earning,
+        wallet,
+        coupon,
+      };
+    });
+
+    const finalOrder = cleanOrder(result.updatedOrder);
+
+    getIO()?.to(`order-${id}`).emit("order-updated", finalOrder);
+    getIO()?.to(`rider-${riderId}`).emit("order-completed", {
+      orderId: order.id,
+      order: finalOrder,
+      earning: result.earning,
+      coupon: result.coupon,
+      wallet: result.wallet,
+    });
+    getIO()?.to(`user-${order.userId}`).emit("order-delivered", finalOrder);
+    getIO()?.emit("order-delivered", finalOrder);
+
+    res.json({
+      success: true,
+      message: "OTP verified and order delivered",
+      order: finalOrder,
+      earning: result.earning,
+      wallet: result.wallet,
+      coupon: result.coupon,
+    });
+  } catch (error) {
+    console.error("Verify Delivery OTP Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "OTP verification failed",
+    });
+  }
+};
 export const updateLiveLocation = async (req, res) => {
   try {
     const riderId = req.user.id;
@@ -384,16 +970,26 @@ export const updateLiveLocation = async (req, res) => {
       where: {
         id: orderId,
         riderId,
-        status: { in: ["ASSIGNED_TO_RIDER", "PICKED_UP", "OUT_FOR_DELIVERY"] },
+        status: {
+          in: ["ASSIGNED_TO_RIDER", "PICKED_UP", "OUT_FOR_DELIVERY"],
+        },
       },
     });
 
     if (!order) {
-      return res.status(400).json({ success: false, message: "Active order not found" });
+      return res.status(400).json({
+        success: false,
+        message: "Active order not found",
+      });
     }
 
     const location = await prisma.riderLocation.upsert({
-      where: { riderId_orderId: { riderId, orderId } },
+      where: {
+        riderId_orderId: {
+          riderId,
+          orderId,
+        },
+      },
       update: {
         latitude: Number(latitude),
         longitude: Number(longitude),
@@ -414,28 +1010,61 @@ export const updateLiveLocation = async (req, res) => {
       updatedAt: location.updatedAt,
     });
 
-    res.json({ success: true, message: "Location updated", location });
+    res.json({
+      success: true,
+      message: "Location updated",
+      location,
+    });
   } catch (error) {
     console.error("Update Live Location Error:", error);
-    res.status(500).json({ success: false, message: "Location update failed" });
+    res.status(500).json({
+      success: false,
+      message: "Location update failed",
+    });
   }
 };
 
 export const getDailyEarnings = async (req, res) => {
   try {
     const riderId = req.user.id;
+    const { type = "daily" } = req.query;
+
+    const start =
+      type === "monthly" ? monthStart() : type === "weekly" ? weekStart() : todayStart();
 
     const earnings = await prisma.riderEarning.findMany({
-      where: { riderId, createdAt: { gte: todayStart() } },
+      where: {
+        riderId,
+        createdAt: { gte: start },
+      },
+      include: {
+        order: {
+          select: {
+            id: true,
+            orderNumber: true,
+            deliveredAt: true,
+            deliveryFee: true,
+          },
+        },
+      },
       orderBy: { createdAt: "desc" },
     });
 
     const total = earnings.reduce((sum, x) => sum + amountNumber(x.amount), 0);
 
-    res.json({ success: true, total, totalOrders: earnings.length, earnings });
+    res.json({
+      success: true,
+      type,
+      total,
+      totalOrders: earnings.length,
+      earnings,
+    });
   } catch (error) {
     console.error("Daily Earnings Error:", error);
-    res.status(500).json({ success: false, message: "Failed to fetch daily earnings" });
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch earnings",
+    });
   }
 };
 
@@ -449,6 +1078,12 @@ export const getWallet = async (req, res) => {
       create: { riderId },
     });
 
+    const settlements = await prisma.riderSettlement.findMany({
+      where: { riderId },
+      orderBy: { createdAt: "desc" },
+      take: 20,
+    });
+
     res.json({
       success: true,
       wallet: {
@@ -457,10 +1092,14 @@ export const getWallet = async (req, res) => {
         todayEarn: amountNumber(wallet.todayEarn),
         totalEarn: amountNumber(wallet.totalEarn),
       },
+      settlements,
     });
   } catch (error) {
     console.error("Wallet Error:", error);
-    res.status(500).json({ success: false, message: "Failed to fetch wallet" });
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch wallet",
+    });
   }
 };
 
@@ -471,15 +1110,27 @@ export const getMyCoupons = async (req, res) => {
     const coupons = await prisma.riderCoupon.findMany({
       where: { riderId },
       include: {
-        order: { select: { id: true, orderNumber: true, deliveredAt: true } },
+        order: {
+          select: {
+            id: true,
+            orderNumber: true,
+            deliveredAt: true,
+          },
+        },
       },
       orderBy: { createdAt: "desc" },
     });
 
-    res.json({ success: true, coupons });
+    res.json({
+      success: true,
+      coupons,
+    });
   } catch (error) {
     console.error("Coupons Error:", error);
-    res.status(500).json({ success: false, message: "Failed to fetch coupons" });
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch coupons",
+    });
   }
 };
 
@@ -487,7 +1138,7 @@ export const getLeaderboard = async (req, res) => {
   try {
     const riders = await prisma.riderWallet.findMany({
       orderBy: { totalEarn: "desc" },
-      take: 10,
+      take: 20,
       include: {
         rider: {
           select: {
@@ -514,7 +1165,10 @@ export const getLeaderboard = async (req, res) => {
     });
   } catch (error) {
     console.error("Leaderboard Error:", error);
-    res.status(500).json({ success: false, message: "Failed to fetch leaderboard" });
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch leaderboard",
+    });
   }
 };
 
@@ -523,16 +1177,27 @@ export const getDeliveryHistory = async (req, res) => {
     const riderId = req.user.id;
 
     const orders = await prisma.order.findMany({
-      where: { riderId, status: { in: ["DELIVERED", "CANCELLED"] } },
+      where: {
+        riderId,
+        status: {
+          in: ["DELIVERED", "CANCELLED"],
+        },
+      },
       include: orderInclude,
       orderBy: { updatedAt: "desc" },
       take: 50,
     });
 
-    res.json({ success: true, orders });
+    res.json({
+      success: true,
+      orders: orders.map(cleanOrder),
+    });
   } catch (error) {
     console.error("Delivery History Error:", error);
-    res.status(500).json({ success: false, message: "Failed to fetch delivery history" });
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch delivery history",
+    });
   }
 };
 
@@ -548,19 +1213,34 @@ export const getRiderAnalytics = async (req, res) => {
           create: { riderId },
         }),
         prisma.riderEarning.findMany({
-          where: { riderId, createdAt: { gte: todayStart() } },
+          where: {
+            riderId,
+            createdAt: { gte: todayStart() },
+          },
         }),
         prisma.order.count({
           where: {
             riderId,
-            status: { in: ["ASSIGNED_TO_RIDER", "PICKED_UP", "OUT_FOR_DELIVERY"] },
+            status: {
+              in: ["ASSIGNED_TO_RIDER", "PICKED_UP", "OUT_FOR_DELIVERY"],
+            },
           },
         }),
-        prisma.order.count({ where: { riderId, status: "DELIVERED" } }),
-        prisma.riderCoupon.count({ where: { riderId } }),
+        prisma.order.count({
+          where: {
+            riderId,
+            status: "DELIVERED",
+          },
+        }),
+        prisma.riderCoupon.count({
+          where: { riderId },
+        }),
       ]);
 
-    const todayTotal = todayEarnings.reduce((sum, x) => sum + amountNumber(x.amount), 0);
+    const todayTotal = todayEarnings.reduce(
+      (sum, x) => sum + amountNumber(x.amount),
+      0
+    );
 
     res.json({
       success: true,
@@ -576,7 +1256,10 @@ export const getRiderAnalytics = async (req, res) => {
     });
   } catch (error) {
     console.error("Rider Analytics Error:", error);
-    res.status(500).json({ success: false, message: "Failed to fetch rider analytics" });
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch rider analytics",
+    });
   }
 };
 
@@ -585,7 +1268,10 @@ export const getRiderProfile = async (req, res) => {
     const riderId = req.user.id;
 
     const rider = await prisma.user.findFirst({
-      where: { id: riderId, role: "RIDER" },
+      where: {
+        id: riderId,
+        role: "RIDER",
+      },
       select: {
         id: true,
         fullName: true,
@@ -609,20 +1295,30 @@ export const getRiderProfile = async (req, res) => {
     });
 
     if (!rider) {
-      return res.status(404).json({ success: false, message: "Rider profile not found" });
+      return res.status(404).json({
+        success: false,
+        message: "Rider profile not found",
+      });
     }
 
-    res.json({ success: true, rider });
+    res.json({
+      success: true,
+      rider,
+    });
   } catch (error) {
     console.error("Rider Profile Error:", error);
-    res.status(500).json({ success: false, message: "Failed to fetch rider profile" });
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch rider profile",
+    });
   }
 };
 
 export const updateRiderProfile = async (req, res) => {
   try {
     const riderId = req.user.id;
-    const { fullName, phone, address, vehicleNo, vehicleType, avatarUrl } = req.body;
+    const { fullName, phone, address, vehicleNo, vehicleType, avatarUrl } =
+      req.body;
 
     const rider = await prisma.user.update({
       where: { id: riderId },
@@ -648,17 +1344,25 @@ export const updateRiderProfile = async (req, res) => {
       },
     });
 
-    res.json({ success: true, message: "Profile updated", rider });
+    res.json({
+      success: true,
+      message: "Profile updated",
+      rider,
+    });
   } catch (error) {
     console.error("Update Rider Profile Error:", error);
-    res.status(500).json({ success: false, message: "Failed to update rider profile" });
+    res.status(500).json({
+      success: false,
+      message: "Failed to update rider profile",
+    });
   }
 };
 
 export const updateRiderKyc = async (req, res) => {
   try {
     const riderId = req.user.id;
-    const { aadhaarNumber, drivingLicense, aadhaarImageUrl, licenseImageUrl } = req.body;
+    const { aadhaarNumber, drivingLicense, aadhaarImageUrl, licenseImageUrl } =
+      req.body;
 
     const rider = await prisma.user.update({
       where: { id: riderId },
@@ -686,7 +1390,10 @@ export const updateRiderKyc = async (req, res) => {
     });
   } catch (error) {
     console.error("Rider KYC Error:", error);
-    res.status(500).json({ success: false, message: "Failed to update KYC" });
+    res.status(500).json({
+      success: false,
+      message: "Failed to update KYC",
+    });
   }
 };
 
@@ -699,10 +1406,41 @@ export const getRiderIncentives = async (req, res) => {
       orderBy: [{ isCompleted: "asc" }, { endDate: "asc" }],
     });
 
-    res.json({ success: true, incentives });
+    res.json({
+      success: true,
+      incentives,
+    });
   } catch (error) {
     console.error("Rider Incentives Error:", error);
-    res.status(500).json({ success: false, message: "Failed to fetch incentives" });
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch incentives",
+    });
+  }
+};
+
+export const getRiderNotifications = async (req, res) => {
+  try {
+    const riderId = req.user.id;
+
+    const notifications = await prisma.notification.findMany({
+      where: {
+        OR: [{ userId: riderId }, { userId: null }],
+      },
+      orderBy: { createdAt: "desc" },
+      take: 50,
+    });
+
+    res.json({
+      success: true,
+      notifications,
+    });
+  } catch (error) {
+    console.error("Rider Notifications Error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch notifications",
+    });
   }
 };
 
@@ -712,7 +1450,10 @@ export const createSupportTicket = async (req, res) => {
     const { subject, message, orderId, priority } = req.body;
 
     if (!subject) {
-      return res.status(400).json({ success: false, message: "Subject is required" });
+      return res.status(400).json({
+        success: false,
+        message: "Subject is required",
+      });
     }
 
     const ticket = await prisma.supportTicket.create({
@@ -732,7 +1473,10 @@ export const createSupportTicket = async (req, res) => {
     });
   } catch (error) {
     console.error("Create Support Ticket Error:", error);
-    res.status(500).json({ success: false, message: "Failed to create support ticket" });
+    res.status(500).json({
+      success: false,
+      message: "Failed to create support ticket",
+    });
   }
 };
 
@@ -750,10 +1494,16 @@ export const getMySupportTickets = async (req, res) => {
       orderBy: { updatedAt: "desc" },
     });
 
-    res.json({ success: true, tickets });
+    res.json({
+      success: true,
+      tickets,
+    });
   } catch (error) {
     console.error("Get Support Tickets Error:", error);
-    res.status(500).json({ success: false, message: "Failed to fetch support tickets" });
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch support tickets",
+    });
   }
 };
 
@@ -764,15 +1514,24 @@ export const addSupportMessage = async (req, res) => {
     const { message, imageUrl } = req.body;
 
     if (!message && !imageUrl) {
-      return res.status(400).json({ success: false, message: "Message or image is required" });
+      return res.status(400).json({
+        success: false,
+        message: "Message or image is required",
+      });
     }
 
     const ticket = await prisma.supportTicket.findFirst({
-      where: { id: ticketId, userId: riderId },
+      where: {
+        id: ticketId,
+        userId: riderId,
+      },
     });
 
     if (!ticket) {
-      return res.status(404).json({ success: false, message: "Ticket not found" });
+      return res.status(404).json({
+        success: false,
+        message: "Ticket not found",
+      });
     }
 
     const supportMessage = await prisma.supportMessage.create({
@@ -796,6 +1555,9 @@ export const addSupportMessage = async (req, res) => {
     });
   } catch (error) {
     console.error("Add Support Message Error:", error);
-    res.status(500).json({ success: false, message: "Failed to add message" });
+    res.status(500).json({
+      success: false,
+      message: "Failed to add message",
+    });
   }
 };

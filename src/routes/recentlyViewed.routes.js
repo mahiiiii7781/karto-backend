@@ -4,12 +4,58 @@ import { protect } from "../middleware/auth.middleware.js";
 
 const router = express.Router();
 
+const normalizeLimit = (value, fallback = 20, max = 50) => {
+  const num = Number(value);
+
+  if (!num || Number.isNaN(num) || num < 1) return fallback;
+
+  return Math.min(num, max);
+};
+
+const getRecentlyViewedItems = async (userId, limit = 20) => {
+  return prisma.recentlyViewedItem.findMany({
+    where: {
+      userId,
+      menuItem: {
+        isAvailable: true,
+      },
+    },
+    include: {
+      menuItem: {
+        include: {
+          restaurant: {
+            include: {
+              category: true,
+              timings: true,
+            },
+          },
+          addons: {
+            where: { isActive: true },
+            orderBy: { createdAt: "asc" },
+          },
+          customizations: {
+            where: { isActive: true },
+            orderBy: { createdAt: "asc" },
+          },
+        },
+      },
+    },
+    orderBy: {
+      viewedAt: "desc",
+    },
+    take: limit,
+  });
+};
+
 router.post("/:menuItemId", protect, async (req, res) => {
   try {
     const { menuItemId } = req.params;
 
     const menuItem = await prisma.menuItem.findUnique({
       where: { id: menuItemId },
+      include: {
+        restaurant: true,
+      },
     });
 
     if (!menuItem) {
@@ -36,18 +82,34 @@ router.post("/:menuItemId", protect, async (req, res) => {
       include: {
         menuItem: {
           include: {
-            restaurant: true,
-            addons: true,
-            customizations: true,
+            restaurant: {
+              include: {
+                category: true,
+                timings: true,
+              },
+            },
+            addons: {
+              where: { isActive: true },
+              orderBy: { createdAt: "asc" },
+            },
+            customizations: {
+              where: { isActive: true },
+              orderBy: { createdAt: "asc" },
+            },
           },
         },
       },
     });
 
+    const items = await getRecentlyViewedItems(req.user.id);
+
     return res.json({
       success: true,
       message: "Recently viewed saved",
       data: viewed,
+      viewed,
+      menuItem: viewed.menuItem,
+      items,
     });
   } catch (error) {
     console.error("Recently Viewed Save Error:", error);
@@ -60,33 +122,14 @@ router.post("/:menuItemId", protect, async (req, res) => {
 
 router.get("/", protect, async (req, res) => {
   try {
-    const items = await prisma.recentlyViewedItem.findMany({
-      where: {
-        userId: req.user.id,
-      },
-      include: {
-        menuItem: {
-          include: {
-            restaurant: true,
-            addons: {
-              where: { isActive: true },
-            },
-            customizations: {
-              where: { isActive: true },
-            },
-          },
-        },
-      },
-      orderBy: {
-        viewedAt: "desc",
-      },
-      take: 20,
-    });
+    const limit = normalizeLimit(req.query.limit, 20, 50);
+    const items = await getRecentlyViewedItems(req.user.id, limit);
 
     return res.json({
       success: true,
       data: items,
       items,
+      count: items.length,
     });
   } catch (error) {
     console.error("Recently Viewed Get Error:", error);
@@ -108,9 +151,15 @@ router.delete("/:menuItemId", protect, async (req, res) => {
       },
     });
 
+    const items = await getRecentlyViewedItems(req.user.id);
+
     return res.json({
       success: true,
       message: "Recently viewed item removed",
+      data: { menuItemId },
+      deletedId: menuItemId,
+      items,
+      count: items.length,
     });
   } catch (error) {
     console.error("Recently Viewed Delete Error:", error);
@@ -132,6 +181,9 @@ router.delete("/", protect, async (req, res) => {
     return res.json({
       success: true,
       message: "Recently viewed cleared",
+      data: true,
+      items: [],
+      count: 0,
     });
   } catch (error) {
     console.error("Recently Viewed Clear Error:", error);

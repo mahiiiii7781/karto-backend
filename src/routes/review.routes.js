@@ -1,8 +1,20 @@
 import express from "express";
 import prisma from "../prisma.js";
-import { protect } from "../middleware/auth.middleware.js";
+import { protect, allowRoles } from "../middleware/auth.middleware.js";
 
 const router = express.Router();
+
+const round1 = value => Math.round(Number(value || 0) * 10) / 10;
+
+const cleanReview = value => {
+  if (value === undefined || value === null) return null;
+
+  const text = String(value).trim();
+
+  if (!text) return null;
+
+  return text.slice(0, 500);
+};
 
 const recalculateMenuItemRating = async menuItemId => {
   const reviews = await prisma.menuItemReview.findMany({
@@ -18,7 +30,10 @@ const recalculateMenuItemRating = async menuItemId => {
   const totalReviews = reviews.length;
   const rating =
     totalReviews > 0
-      ? reviews.reduce((sum, r) => sum + Number(r.rating || 0), 0) / totalReviews
+      ? round1(
+          reviews.reduce((sum, r) => sum + Number(r.rating || 0), 0) /
+            totalReviews
+        )
       : 0;
 
   await prisma.menuItem.update({
@@ -28,6 +43,11 @@ const recalculateMenuItemRating = async menuItemId => {
       totalReviews,
     },
   });
+
+  return {
+    rating,
+    totalReviews,
+  };
 };
 
 // Create/update menu item review
@@ -45,8 +65,13 @@ router.post("/menu-item/:menuItemId", protect, async (req, res) => {
       });
     }
 
+    const finalReview = cleanReview(review);
+
     const menuItem = await prisma.menuItem.findUnique({
       where: { id: menuItemId },
+      include: {
+        restaurant: true,
+      },
     });
 
     if (!menuItem) {
@@ -93,7 +118,7 @@ router.post("/menu-item/:menuItemId", protect, async (req, res) => {
         where: { id: existing.id },
         data: {
           rating: finalRating,
-          review: review || null,
+          review: finalReview,
           isActive: true,
         },
         include: {
@@ -104,6 +129,7 @@ router.post("/menu-item/:menuItemId", protect, async (req, res) => {
               avatarUrl: true,
             },
           },
+          menuItem: true,
         },
       });
     } else {
@@ -113,7 +139,7 @@ router.post("/menu-item/:menuItemId", protect, async (req, res) => {
           menuItemId,
           orderId: orderId || null,
           rating: finalRating,
-          review: review || null,
+          review: finalReview,
         },
         include: {
           user: {
@@ -123,20 +149,31 @@ router.post("/menu-item/:menuItemId", protect, async (req, res) => {
               avatarUrl: true,
             },
           },
+          menuItem: true,
         },
       });
     }
 
-    await recalculateMenuItemRating(menuItemId);
+    const ratingSummary = await recalculateMenuItemRating(menuItemId);
 
     return res.status(201).json({
       success: true,
       message: "Review saved successfully",
       data: savedReview,
       review: savedReview,
+      rating: ratingSummary.rating,
+      totalReviews: ratingSummary.totalReviews,
     });
   } catch (error) {
     console.error("Create Menu Review Error:", error);
+
+    if (error.code === "P2002") {
+      return res.status(409).json({
+        success: false,
+        message: "You already reviewed this item",
+      });
+    }
+
     return res.status(500).json({
       success: false,
       message: error.message || "Something went wrong",
@@ -148,30 +185,49 @@ router.post("/menu-item/:menuItemId", protect, async (req, res) => {
 router.get("/menu-item/:menuItemId", async (req, res) => {
   try {
     const { menuItemId } = req.params;
+    const limit = Math.min(Number(req.query.limit || 20), 100);
 
-    const reviews = await prisma.menuItemReview.findMany({
-      where: {
-        menuItemId,
-        isActive: true,
-      },
-      include: {
-        user: {
-          select: {
-            id: true,
-            fullName: true,
-            avatarUrl: true,
+    const [reviews, summary] = await Promise.all([
+      prisma.menuItemReview.findMany({
+        where: {
+          menuItemId,
+          isActive: true,
+        },
+        include: {
+          user: {
+            select: {
+              id: true,
+              fullName: true,
+              avatarUrl: true,
+            },
           },
         },
-      },
-      orderBy: {
-        createdAt: "desc",
-      },
-    });
+        orderBy: {
+          createdAt: "desc",
+        },
+        take: limit,
+      }),
+      prisma.menuItemReview.aggregate({
+        where: {
+          menuItemId,
+          isActive: true,
+        },
+        _avg: {
+          rating: true,
+        },
+        _count: {
+          rating: true,
+        },
+      }),
+    ]);
 
     return res.json({
       success: true,
       data: reviews,
       reviews,
+      rating: round1(summary._avg.rating || 0),
+      totalReviews: summary._count.rating || 0,
+      count: reviews.length,
     });
   } catch (error) {
     console.error("Get Menu Reviews Error:", error);
@@ -186,22 +242,28 @@ router.get("/menu-item/:menuItemId", async (req, res) => {
 router.delete("/menu-item/:menuItemId", protect, async (req, res) => {
   try {
     const { menuItemId } = req.params;
+    const { orderId } = req.query;
 
-    await prisma.menuItemReview.updateMany({
+    const result = await prisma.menuItemReview.updateMany({
       where: {
         menuItemId,
         userId: req.user.id,
+        ...(orderId ? { orderId: String(orderId) } : {}),
       },
       data: {
         isActive: false,
       },
     });
 
-    await recalculateMenuItemRating(menuItemId);
+    const ratingSummary = await recalculateMenuItemRating(menuItemId);
 
     return res.json({
       success: true,
       message: "Review removed successfully",
+      data: result,
+      updatedCount: result.count,
+      rating: ratingSummary.rating,
+      totalReviews: ratingSummary.totalReviews,
     });
   } catch (error) {
     console.error("Delete Menu Review Error:", error);
@@ -211,5 +273,47 @@ router.delete("/menu-item/:menuItemId", protect, async (req, res) => {
     });
   }
 });
+
+// Admin hide review
+router.patch(
+  "/menu-item/:menuItemId/:reviewId/hide",
+  protect,
+  allowRoles("ADMIN"),
+  async (req, res) => {
+    try {
+      const { menuItemId, reviewId } = req.params;
+
+      const savedReview = await prisma.menuItemReview.update({
+        where: { id: reviewId },
+        data: { isActive: false },
+      });
+
+      const ratingSummary = await recalculateMenuItemRating(menuItemId);
+
+      return res.json({
+        success: true,
+        message: "Review hidden successfully",
+        data: savedReview,
+        review: savedReview,
+        rating: ratingSummary.rating,
+        totalReviews: ratingSummary.totalReviews,
+      });
+    } catch (error) {
+      console.error("Admin Hide Review Error:", error);
+
+      if (error.code === "P2025") {
+        return res.status(404).json({
+          success: false,
+          message: "Review not found",
+        });
+      }
+
+      return res.status(500).json({
+        success: false,
+        message: error.message || "Something went wrong",
+      });
+    }
+  }
+);
 
 export default router;

@@ -3,11 +3,19 @@ import {
   emitOrderStatus,
   emitNewOrder,
   emitVendorDashboardUpdate,
+  emitToAdmin,
+  broadcastToCityRiders,
 } from "../config/socket.js";
+
 import {
   sendPushToUser,
   notificationTemplates,
 } from "../services/notification.service.js";
+
+import {
+  calculateDeliveryFee,
+  calculateDistanceKm,
+} from "../utils/deliveryFee.js";
 
 const generateOrderNumber = () => {
   const date = new Date();
@@ -15,20 +23,52 @@ const generateOrderNumber = () => {
   const m = String(date.getMonth() + 1).padStart(2, "0");
   const d = String(date.getDate()).padStart(2, "0");
   const random = Math.floor(1000 + Math.random() * 9000);
-
   return `KT${y}${m}${d}${random}`;
 };
 
-const toNumber = value => Number(value || 0);
+const generateUniqueOrderNumber = async (tx) => {
+  for (let i = 0; i < 8; i++) {
+    const orderNumber = generateOrderNumber();
 
-const round2 = value =>
+    const exists = await tx.order.findUnique({
+      where: { orderNumber },
+      select: { id: true },
+    });
+
+    if (!exists) return orderNumber;
+  }
+
+  return `KT${Date.now()}`;
+};
+
+const generateDeliveryOtp = () =>
+  String(Math.floor(1000 + Math.random() * 9000));
+
+const deliveryOtpExpiry = () =>
+  new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+const hideDeliveryOtp = (order) => {
+  if (!order) return order;
+
+  return {
+    ...order,
+    deliveryOtp: undefined,
+    deliveryOtpExpiresAt: undefined,
+  };
+};
+
+const hideDeliveryOtpFromList = (orders = []) => orders.map(hideDeliveryOtp);
+
+const toNumber = (value) => Number(value || 0);
+
+const round2 = (value) =>
   Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
 
 const PLATFORM_FEE = round2(process.env.KARTO_PLATFORM_FEE || 5);
 const CGST_RATE = round2(process.env.KARTO_CGST_RATE || 2.5);
 const SGST_RATE = round2(process.env.KARTO_SGST_RATE || 2.5);
 
-const normalizeCouponCode = code => String(code || "").trim().toUpperCase();
+const normalizeCouponCode = (code) => String(code || "").trim().toUpperCase();
 
 const calculateCouponDiscount = ({ coupon, itemTotal, deliveryFee }) => {
   let discount = 0;
@@ -51,12 +91,49 @@ const calculateCouponDiscount = ({ coupon, itemTotal, deliveryFee }) => {
   return round2(Math.max(0, Math.min(discount, itemTotal + deliveryFee)));
 };
 
-const calculateOrderPricing = ({ cartItems, restaurant, discount = 0 }) => {
+const calculateFreshCartItemPricing = (item) => {
+  const basePrice = toNumber(item.menuItem?.price);
+
+  const customizationTotal = Array.isArray(item.customizationJson)
+    ? item.customizationJson.reduce(
+        (sum, data) => sum + toNumber(data?.price),
+        0
+      )
+    : 0;
+
+  const addonTotal = Array.isArray(item.addonJson)
+    ? item.addonJson.reduce((sum, data) => sum + toNumber(data?.price), 0)
+    : 0;
+
+  const unitPrice = round2(basePrice + customizationTotal + addonTotal);
+  const quantity = Math.max(1, Number(item.quantity || 1));
+  const totalPrice = round2(unitPrice * quantity);
+
+  return {
+    quantity,
+    unitPrice,
+    totalPrice,
+  };
+};
+
+const calculateOrderPricing = ({
+  cartItems,
+  restaurant,
+  address,
+  discount = 0,
+}) => {
   const itemTotal = round2(
     cartItems.reduce((sum, item) => sum + toNumber(item.totalPrice), 0)
   );
 
-  const deliveryFee = round2(restaurant?.deliveryFee || 0);
+  const distanceKm = calculateDistanceKm(
+    restaurant?.latitude,
+    restaurant?.longitude,
+    address?.latitude,
+    address?.longitude
+  );
+
+  const deliveryFee = round2(calculateDeliveryFee(itemTotal, distanceKm));
   const platformFee = PLATFORM_FEE;
 
   const cgstAmount = round2((itemTotal * CGST_RATE) / 100);
@@ -69,6 +146,7 @@ const calculateOrderPricing = ({ cartItems, restaurant, discount = 0 }) => {
 
   return {
     itemTotal,
+    distanceKm,
     deliveryFee,
     platformFee,
     cgstRate: CGST_RATE,
@@ -77,10 +155,11 @@ const calculateOrderPricing = ({ cartItems, restaurant, discount = 0 }) => {
     sgstAmount,
     taxAmount,
     discount: round2(discount),
-    totalAmount,
+    totalAmount: Math.max(0, totalAmount),
     pricingResponse: {
       cartValue: itemTotal,
       subtotal: itemTotal,
+      distanceKm,
       deliveryFee,
       platformFee,
       tax: {
@@ -92,13 +171,13 @@ const calculateOrderPricing = ({ cartItems, restaurant, discount = 0 }) => {
       },
       taxAmount,
       discount: round2(discount),
-      totalAmount,
-      grandTotal: totalAmount,
+      totalAmount: Math.max(0, totalAmount),
+      grandTotal: Math.max(0, totalAmount),
     },
   };
 };
 
-const safeNotify = async payload => {
+const safeNotify = async (payload) => {
   try {
     if (!payload?.userId) return;
     await sendPushToUser(payload);
@@ -107,17 +186,17 @@ const safeNotify = async payload => {
   }
 };
 
-const parseTimeToMinutes = value => {
+const parseTimeToMinutes = (value) => {
   if (!value) return null;
   const [h, m] = String(value).split(":").map(Number);
   if (Number.isNaN(h) || Number.isNaN(m)) return null;
   return h * 60 + m;
 };
 
-const getDayName = date =>
+const getDayName = (date) =>
   date.toLocaleDateString("en-IN", { weekday: "long" }).toLowerCase();
 
-const isRestaurantAvailableNow = restaurant => {
+const isRestaurantAvailableNow = (restaurant) => {
   const now = new Date();
 
   if (!restaurant.isOpen) {
@@ -159,15 +238,10 @@ const isRestaurantAvailableNow = restaurant => {
   if (openMinutes !== null && closeMinutes !== null) {
     const currentMinutes = now.getHours() * 60 + now.getMinutes();
 
-    let isInsideTime = false;
-
-    if (openMinutes <= closeMinutes) {
-      isInsideTime =
-        currentMinutes >= openMinutes && currentMinutes <= closeMinutes;
-    } else {
-      isInsideTime =
-        currentMinutes >= openMinutes || currentMinutes <= closeMinutes;
-    }
+    const isInsideTime =
+      openMinutes <= closeMinutes
+        ? currentMinutes >= openMinutes && currentMinutes <= closeMinutes
+        : currentMinutes >= openMinutes || currentMinutes <= closeMinutes;
 
     if (!isInsideTime) {
       return {
@@ -180,9 +254,159 @@ const isRestaurantAvailableNow = restaurant => {
   return { allowed: true, message: "Store is available" };
 };
 
+const orderIncludeFull = {
+  user: {
+    select: {
+      id: true,
+      fullName: true,
+      phone: true,
+      email: true,
+      avatarUrl: true,
+    },
+  },
+  restaurant: true,
+  coupon: true,
+  address: true,
+  rider: {
+    select: {
+      id: true,
+      fullName: true,
+      phone: true,
+      vehicleNo: true,
+      vehicleType: true,
+      avatarUrl: true,
+    },
+  },
+  items: {
+    include: {
+      menuItem: true,
+    },
+    orderBy: { createdAt: "asc" },
+  },
+  history: {
+    orderBy: { createdAt: "asc" },
+  },
+};
+
+const buildRiderOrderPayload = (order) => {
+  if (!order) return null;
+
+  return {
+    id: order.id,
+    orderNumber: order.orderNumber,
+    status: order.status,
+    paymentMethod: order.paymentMethod,
+    paymentStatus: order.paymentStatus,
+    totalAmount: toNumber(order.totalAmount),
+    itemTotal: toNumber(order.itemTotal),
+    deliveryFee: toNumber(order.deliveryFee),
+    distanceKm: order.distanceKm ? toNumber(order.distanceKm) : null,
+    customerNote: order.customerNote,
+    createdAt: order.createdAt,
+    readyAt: order.readyAt,
+    restaurantId: order.restaurantId,
+    vendorId: order.vendorId,
+    cityId: order.restaurant?.cityId || order.address?.cityId || null,
+    customer: order.user
+      ? {
+          id: order.user.id,
+          name: order.user.fullName,
+          phone: order.user.phone,
+          avatarUrl: order.user.avatarUrl,
+        }
+      : null,
+    vendor: order.restaurant
+      ? {
+          id: order.restaurant.id,
+          name: order.restaurant.name,
+          ownerName: order.restaurant.ownerName,
+          phone: order.restaurant.phone || order.restaurant.ownerMobileNo,
+          address: order.restaurant.address,
+          latitude: order.restaurant.latitude,
+          longitude: order.restaurant.longitude,
+          imageUrl: order.restaurant.imageUrl,
+        }
+      : null,
+    pickupAddress: order.restaurant?.address || null,
+    deliveryAddress: order.address || null,
+    items: order.items || [],
+  };
+};
+
+const notifyAvailableRiders = async (order) => {
+  try {
+    const fullOrder = await prisma.order.findUnique({
+      where: { id: order.id },
+      include: orderIncludeFull,
+    });
+
+    if (!fullOrder) return;
+
+    const payload = buildRiderOrderPayload(fullOrder);
+    const cityId = fullOrder.restaurant?.cityId || fullOrder.address?.cityId;
+
+    if (cityId) {
+      broadcastToCityRiders(cityId, "new-rider-order", {
+        order: payload,
+        assignmentType: "CITY_BROADCAST",
+      });
+
+      broadcastToCityRiders(cityId, "new-order-assignment", {
+        order: payload,
+        assignmentType: "CITY_BROADCAST",
+      });
+    } else {
+      emitToAdmin("rider-assignment-city-missing", {
+        orderId: fullOrder.id,
+        orderNumber: fullOrder.orderNumber,
+      });
+    }
+
+    emitToAdmin("new-rider-order-created", {
+      order: payload,
+      cityId: cityId || null,
+    });
+
+    const riders = await prisma.user.findMany({
+      where: {
+        role: "RIDER",
+        isActive: true,
+        isOnline: true,
+        kycStatus: "APPROVED",
+        ...(cityId ? { cityId } : {}),
+      },
+      select: { id: true },
+      take: 50,
+    });
+
+    await Promise.all(
+      riders.map((rider) =>
+        safeNotify({
+          userId: rider.id,
+          type: "ORDER",
+          title: "New delivery request",
+          body: `Order ${fullOrder.orderNumber} is ready for pickup`,
+          data: {
+            orderId: fullOrder.id,
+            orderNumber: fullOrder.orderNumber,
+            status: fullOrder.status,
+          },
+        })
+      )
+    );
+  } catch (error) {
+    console.error("Notify Available Riders Error:", error.message);
+  }
+};
+
 export const createOrder = async (req, res) => {
   try {
-    const { addressId, paymentMethod = "COD", customerNote, couponCode } = req.body;
+    const {
+      addressId,
+      paymentMethod = "COD",
+      customerNote,
+      couponCode,
+    } = req.body;
 
     if (!addressId) {
       return res.status(400).json({
@@ -198,7 +422,7 @@ export const createOrder = async (req, res) => {
       });
     }
 
-    const cartItems = await prisma.cartItem.findMany({
+    const cartItemsRaw = await prisma.cartItem.findMany({
       where: { userId: req.user.id },
       include: {
         menuItem: true,
@@ -207,17 +431,17 @@ export const createOrder = async (req, res) => {
       orderBy: { createdAt: "asc" },
     });
 
-    if (!cartItems.length) {
+    if (!cartItemsRaw.length) {
       return res.status(400).json({
         success: false,
         message: "Cart is empty",
       });
     }
 
-    const restaurantId = cartItems[0].restaurantId;
+    const restaurantId = cartItemsRaw[0].restaurantId;
 
-    const hasDifferentRestaurant = cartItems.some(
-      item => item.restaurantId !== restaurantId
+    const hasDifferentRestaurant = cartItemsRaw.some(
+      (item) => item.restaurantId !== restaurantId
     );
 
     if (hasDifferentRestaurant) {
@@ -239,6 +463,20 @@ export const createOrder = async (req, res) => {
       });
     }
 
+    const address = await prisma.userAddress.findFirst({
+      where: {
+        id: addressId,
+        userId: req.user.id,
+      },
+    });
+
+    if (!address) {
+      return res.status(404).json({
+        success: false,
+        message: "Delivery address not found",
+      });
+    }
+
     const availability = isRestaurantAvailableNow(restaurant);
 
     if (!availability.allowed) {
@@ -248,22 +486,44 @@ export const createOrder = async (req, res) => {
       });
     }
 
-    const unavailableItem = cartItems.find(item => {
-      return !item.menuItem || item.menuItem.isAvailable === false;
-    });
+    const unavailableItem = cartItemsRaw.find(
+      (item) => !item.menuItem || item.menuItem.isAvailable === false
+    );
 
     if (unavailableItem) {
       return res.status(400).json({
         success: false,
-        message: `${unavailableItem.menuItem?.name || "Item"} is currently unavailable`,
+        message: `${
+          unavailableItem.menuItem?.name || "Item"
+        } is currently unavailable`,
       });
     }
+
+    const cartItems = cartItemsRaw.map((item) => {
+      const freshPricing = calculateFreshCartItemPricing(item);
+
+      return {
+        ...item,
+        quantity: freshPricing.quantity,
+        price: freshPricing.unitPrice,
+        totalPrice: freshPricing.totalPrice,
+      };
+    });
 
     const itemTotal = round2(
       cartItems.reduce((sum, item) => sum + toNumber(item.totalPrice), 0)
     );
 
-    const deliveryFeeForCoupon = round2(restaurant.deliveryFee);
+    const distanceKmForCoupon = calculateDistanceKm(
+      restaurant?.latitude,
+      restaurant?.longitude,
+      address?.latitude,
+      address?.longitude
+    );
+
+    const deliveryFeeForCoupon = round2(
+      calculateDeliveryFee(itemTotal, distanceKmForCoupon)
+    );
 
     let discount = 0;
     let couponId = null;
@@ -363,41 +623,56 @@ export const createOrder = async (req, res) => {
     const pricing = calculateOrderPricing({
       cartItems,
       restaurant,
+      address,
       discount,
     });
 
     const defaultPrepTime =
       Number(restaurant.defaultPrepTime) ||
       Math.max(
-        ...cartItems.map(item => Number(item.menuItem?.prepTimeMin || 20)),
+        ...cartItems.map((item) => Number(item.menuItem?.prepTimeMin || 20)),
         20
       );
 
-    const order = await prisma.$transaction(async tx => {
+    const paymentStatus = paymentMethod === "COD" ? "PENDING" : "PENDING";
+
+    const order = await prisma.$transaction(async (tx) => {
+      const orderNumber = await generateUniqueOrderNumber(tx);
+
       const newOrder = await tx.order.create({
         data: {
           userId: req.user.id,
           restaurantId,
           vendorId: restaurant.vendorId,
           addressId,
-
           itemTotal: pricing.itemTotal,
           deliveryFee: pricing.deliveryFee,
+          distanceKm: pricing.distanceKm,
           discount: pricing.discount,
           couponId,
           taxAmount: pricing.taxAmount,
           totalAmount: pricing.totalAmount,
-
+          platformFee: pricing.platformFee,
+          cgstRate: pricing.cgstRate,
+          sgstRate: pricing.sgstRate,
+          cgstAmount: pricing.cgstAmount,
+          sgstAmount: pricing.sgstAmount,
           paymentMethod,
-          paymentStatus: "PENDING",
+          paymentStatus,
           status: "PLACED",
-
-          orderNumber: generateOrderNumber(),
+          orderNumber,
           customerNote: customerNote || null,
           estimatedPreparationMinutes: defaultPrepTime,
 
+          // Delivery OTP is generated when order is created.
+          // It should be shown only to customer/user app.
+          // Rider will enter this OTP at delivery time to complete order.
+          deliveryOtp: generateDeliveryOtp(),
+          deliveryOtpVerified: false,
+          deliveryOtpExpiresAt: deliveryOtpExpiry(),
+
           items: {
-            create: cartItems.map(item => ({
+            create: cartItems.map((item) => ({
               menuItemId: item.menuItemId,
               restaurantId: item.restaurantId,
               quantity: item.quantity,
@@ -408,7 +683,6 @@ export const createOrder = async (req, res) => {
               addonJson: item.addonJson || null,
             })),
           },
-
           history: {
             create: {
               status: "PLACED",
@@ -419,26 +693,7 @@ export const createOrder = async (req, res) => {
             },
           },
         },
-        include: {
-          user: {
-            select: {
-              id: true,
-              fullName: true,
-              phone: true,
-              email: true,
-            },
-          },
-          items: {
-            include: {
-              menuItem: true,
-            },
-            orderBy: { createdAt: "asc" },
-          },
-          restaurant: true,
-          coupon: true,
-          history: true,
-          address: true,
-        },
+        include: orderIncludeFull,
       });
 
       if (couponId) {
@@ -464,10 +719,24 @@ export const createOrder = async (req, res) => {
       return newOrder;
     });
 
+    const safeOrderForVendor = hideDeliveryOtp(order);
+
     if (order.vendorId) {
-      emitNewOrder(order.vendorId, order);
+      emitNewOrder(order.vendorId, safeOrderForVendor);
       emitVendorDashboardUpdate(order.vendorId);
     }
+
+    emitToAdmin("new-order-created", {
+      order: safeOrderForVendor,
+      restaurantId: order.restaurantId,
+      vendorId: order.vendorId,
+      cityId: order.restaurant?.cityId || order.address?.cityId || null,
+    });
+
+    emitOrderStatus(order.id, order.status, {
+      order,
+      message: "Order placed successfully",
+    });
 
     const customerMsg = notificationTemplates.ORDER_PLACED_CUSTOMER();
 
@@ -511,6 +780,14 @@ export const createOrder = async (req, res) => {
     });
   } catch (error) {
     console.error("Create Order Error:", error);
+
+    if (error.code === "P2002") {
+      return res.status(409).json({
+        success: false,
+        message: "Order number conflict, please try again",
+      });
+    }
+
     return res.status(500).json({
       success: false,
       message: "Something went wrong",
@@ -526,7 +803,19 @@ export const myOrders = async (req, res) => {
       include: {
         restaurant: true,
         coupon: true,
+        address: true,
+        rider: {
+          select: {
+            id: true,
+            fullName: true,
+            phone: true,
+            vehicleNo: true,
+            vehicleType: true,
+            avatarUrl: true,
+          },
+        },
         items: { orderBy: { createdAt: "asc" } },
+        history: { orderBy: { createdAt: "asc" } },
       },
       orderBy: { createdAt: "desc" },
     });
@@ -546,28 +835,22 @@ export const getOrderById = async (req, res) => {
   try {
     const { id } = req.params;
 
+    const where = {
+      id,
+      ...(req.user.role === "ADMIN"
+        ? {}
+        : {
+            OR: [
+              { userId: req.user.id },
+              { vendorId: req.user.id },
+              { riderId: req.user.id },
+            ],
+          }),
+    };
+
     const order = await prisma.order.findFirst({
-      where: {
-        id,
-        OR: [
-          { userId: req.user.id },
-          { vendorId: req.user.id },
-          { riderId: req.user.id },
-        ],
-      },
-      include: {
-        restaurant: true,
-        coupon: true,
-        items: { orderBy: { createdAt: "asc" } },
-        history: { orderBy: { createdAt: "asc" } },
-        rider: {
-          select: {
-            id: true,
-            fullName: true,
-            phone: true,
-          },
-        },
-      },
+      where,
+      include: orderIncludeFull,
     });
 
     if (!order) {
@@ -577,7 +860,14 @@ export const getOrderById = async (req, res) => {
       });
     }
 
-    return res.json({ success: true, order, data: order });
+    const responseOrder =
+      req.user.id === order.userId ? order : hideDeliveryOtp(order);
+
+    return res.json({
+      success: true,
+      order: responseOrder,
+      data: responseOrder,
+    });
   } catch (error) {
     console.error("Order Detail Error:", error);
     return res.status(500).json({
@@ -590,8 +880,11 @@ export const getOrderById = async (req, res) => {
 
 export const vendorOrders = async (req, res) => {
   try {
+    const where =
+      req.user.role === "ADMIN" ? {} : { vendorId: req.user.id };
+
     const orders = await prisma.order.findMany({
-      where: { vendorId: req.user.id },
+      where,
       include: {
         coupon: true,
         user: {
@@ -603,12 +896,30 @@ export const vendorOrders = async (req, res) => {
           },
         },
         restaurant: true,
+        address: true,
+        rider: {
+          select: {
+            id: true,
+            fullName: true,
+            phone: true,
+            vehicleNo: true,
+            vehicleType: true,
+            avatarUrl: true,
+          },
+        },
         items: { orderBy: { createdAt: "asc" } },
+        history: { orderBy: { createdAt: "asc" } },
       },
       orderBy: { createdAt: "desc" },
     });
 
-    return res.json({ success: true, data: orders, orders });
+    const safeOrders = hideDeliveryOtpFromList(orders);
+
+    return res.json({
+      success: true,
+      data: safeOrders,
+      orders: safeOrders,
+    });
   } catch (error) {
     console.error("Vendor Orders Error:", error);
     return res.status(500).json({
@@ -621,24 +932,22 @@ export const vendorOrders = async (req, res) => {
 
 export const riderOrders = async (req, res) => {
   try {
+    const where =
+      req.user.role === "ADMIN" ? {} : { riderId: req.user.id };
+
     const orders = await prisma.order.findMany({
-      where: { riderId: req.user.id },
-      include: {
-        coupon: true,
-        user: {
-          select: {
-            id: true,
-            fullName: true,
-            phone: true,
-          },
-        },
-        restaurant: true,
-        items: { orderBy: { createdAt: "asc" } },
-      },
+      where,
+      include: orderIncludeFull,
       orderBy: { createdAt: "desc" },
     });
 
-    return res.json({ success: true, data: orders, orders });
+    const safeOrders = hideDeliveryOtpFromList(orders);
+
+    return res.json({
+      success: true,
+      data: safeOrders,
+      orders: safeOrders,
+    });
   } catch (error) {
     console.error("Rider Orders Error:", error);
     return res.status(500).json({
@@ -665,6 +974,21 @@ export const updateOrderStatus = async (req, res) => {
       "CANCELLED",
     ];
 
+    const vendorAllowedStatuses = [
+      "ACCEPTED_BY_VENDOR",
+      "PREPARING",
+      "READY_FOR_PICKUP",
+      "CANCELLED",
+    ];
+
+    const riderAllowedStatuses = [
+      "PICKED_UP",
+      "OUT_FOR_DELIVERY",
+      "DELIVERED",
+    ];
+
+    const adminAllowedStatuses = allowedStatuses;
+
     if (!allowedStatuses.includes(status)) {
       return res.status(400).json({
         success: false,
@@ -688,11 +1012,60 @@ export const updateOrderStatus = async (req, res) => {
       });
     }
 
+    if (["DELIVERED", "CANCELLED"].includes(order.status)) {
+      return res.status(400).json({
+        success: false,
+        message: `Order is already ${order.status.toLowerCase()}`,
+      });
+    }
+
+    if (req.user.role === "VENDOR") {
+      if (order.vendorId !== req.user.id) {
+        return res.status(403).json({
+          success: false,
+          message: "You cannot update this order",
+        });
+      }
+
+      if (!vendorAllowedStatuses.includes(status)) {
+        return res.status(403).json({
+          success: false,
+          message: "Vendor cannot set this status",
+        });
+      }
+    }
+
+    if (req.user.role === "RIDER") {
+      if (order.riderId !== req.user.id) {
+        return res.status(403).json({
+          success: false,
+          message: "You cannot update this order",
+        });
+      }
+
+      if (!riderAllowedStatuses.includes(status)) {
+        return res.status(403).json({
+          success: false,
+          message: "Rider cannot set this status",
+        });
+      }
+    }
+
+    if (req.user.role === "ADMIN") {
+      if (!adminAllowedStatuses.includes(status)) {
+        return res.status(403).json({
+          success: false,
+          message: "Admin cannot set this status",
+        });
+      }
+    }
+
     const timeFieldMap = {
       ACCEPTED_BY_VENDOR: "acceptedAt",
       PREPARING: "preparingAt",
       READY_FOR_PICKUP: "readyAt",
       PICKED_UP: "pickedAt",
+      OUT_FOR_DELIVERY: "outForDeliveryAt",
       DELIVERED: "deliveredAt",
       CANCELLED: "cancelledAt",
     };
@@ -703,10 +1076,11 @@ export const updateOrderStatus = async (req, res) => {
       updateData[timeFieldMap[status]] = new Date();
     }
 
-    const updatedOrder = await prisma.$transaction(async tx => {
+    const updatedOrder = await prisma.$transaction(async (tx) => {
       const updated = await tx.order.update({
         where: { id },
         data: updateData,
+        include: orderIncludeFull,
       });
 
       await tx.orderStatusHistory.create({
@@ -726,7 +1100,9 @@ export const updateOrderStatus = async (req, res) => {
         if (!existingVendorSettlement && order.vendorId) {
           const grossAmount = toNumber(order.totalAmount);
           const commissionPercent = toNumber(order.restaurant?.commission || 10);
-          const commissionAmount = round2((grossAmount * commissionPercent) / 100);
+          const commissionAmount = round2(
+            (grossAmount * commissionPercent) / 100
+          );
           const netAmount = round2(grossAmount - commissionAmount);
 
           await tx.vendorSettlement.create({
@@ -751,7 +1127,7 @@ export const updateOrderStatus = async (req, res) => {
             data: {
               riderId: order.riderId,
               orderId: order.id,
-              amount: 30,
+              amount: toNumber(order.deliveryFee || 30),
               status: "PENDING",
             },
           });
@@ -837,7 +1213,27 @@ export const updateOrderStatus = async (req, res) => {
       });
     }
 
-    emitOrderStatus(id, status, { order: updatedOrder });
+    const safeOrderForNonCustomer = hideDeliveryOtp(updatedOrder);
+
+    emitOrderStatus(id, status, {
+      order:
+        status === "DELIVERED" || status === "CANCELLED"
+          ? safeOrderForNonCustomer
+          : updatedOrder,
+    });
+
+    if (updatedOrder.vendorId) {
+      emitVendorDashboardUpdate(updatedOrder.vendorId);
+    }
+
+    emitToAdmin("order-status-updated", {
+      order: safeOrderForNonCustomer,
+      status,
+    });
+
+    if (status === "READY_FOR_PICKUP") {
+      await notifyAvailableRiders(updatedOrder);
+    }
 
     return res.json({
       success: true,

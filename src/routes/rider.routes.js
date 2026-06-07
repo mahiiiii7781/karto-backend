@@ -1,6 +1,8 @@
 import express from "express";
 import {
   updateOnlineStatus,
+  getRiderDashboard,
+  getCurrentAssignment,
   getNewOrders,
   getActiveOrders,
   getOrderDetail,
@@ -9,6 +11,7 @@ import {
   markPicked,
   startDelivery,
   completeOrder,
+  verifyDeliveryOtp,
   updateLiveLocation,
   getDailyEarnings,
   getWallet,
@@ -20,6 +23,7 @@ import {
   updateRiderProfile,
   updateRiderKyc,
   getRiderIncentives,
+  getRiderNotifications,
   createSupportTicket,
   getMySupportTickets,
   addSupportMessage,
@@ -31,11 +35,14 @@ const router = express.Router();
 
 router.use(protect, allowRoles("RIDER"));
 
+router.get("/dashboard", getRiderDashboard);
+
 router.get("/profile", getRiderProfile);
 router.patch("/profile", updateRiderProfile);
 router.patch("/kyc", updateRiderKyc);
 router.patch("/online-status", updateOnlineStatus);
 
+router.get("/orders/assignment/current", getCurrentAssignment);
 router.get("/orders/new", getNewOrders);
 router.get("/orders/active", getActiveOrders);
 router.get("/orders/history", getDeliveryHistory);
@@ -55,7 +62,8 @@ router.get("/coupons", getMyCoupons);
 router.get("/leaderboard", getLeaderboard);
 router.get("/analytics", getRiderAnalytics);
 router.get("/incentives", getRiderIncentives);
-
+router.get("/notifications", getRiderNotifications);
+router.post("/orders/:id/verify-delivery-otp", verifyDeliveryOtp);
 router.post("/support/tickets", createSupportTicket);
 router.get("/support/tickets", getMySupportTickets);
 router.post("/support/tickets/:ticketId/messages", addSupportMessage);

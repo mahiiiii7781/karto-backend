@@ -24,6 +24,11 @@ const safeUser = (user) => ({
   createdAt: user.createdAt,
 });
 
+const normalizeEmail = (email) =>
+  email ? String(email).trim().toLowerCase() : null;
+
+const normalizePhone = (phone) => (phone ? String(phone).trim() : null);
+
 const generateOtp = () =>
   Math.floor(100000 + Math.random() * 900000).toString();
 
@@ -56,9 +61,9 @@ const mailTransporter = nodemailer.createTransport({
 
 /* =========================================================
    RESEND EMAIL SETUP - ACTIVE
-   Required Railway env:
+   Required Railway/Render env:
    RESEND_API_KEY=re_xxxxx
-   EMAIL_FROM=onboarding@resend.dev
+   EMAIL_FROM=onboarding@resend.dev or verified domain email
    ========================================================= */
 
 const resend = new Resend(env.RESEND_API_KEY || process.env.RESEND_API_KEY);
@@ -77,6 +82,7 @@ console.log("SMTP_HOST:", process.env.SMTP_HOST);
 console.log("SMTP_PORT:", process.env.SMTP_PORT);
 console.log("RESEND_API_KEY EXISTS:", Boolean(process.env.RESEND_API_KEY));
 console.log("EMAIL_FROM:", process.env.EMAIL_FROM);
+console.log("TWILIO_CONFIGURED:", Boolean(twilioClient));
 
 /* =========================================================
    OLD GMAIL OTP SENDER - COMMENTED, KEPT FOR FALLBACK ONLY
@@ -157,7 +163,9 @@ const sendEmailOtp = async (email, code) => {
     }
 
     const { data, error } = await resend.emails.send({
-     from: `Karto Support Team <${env.EMAIL_FROM || process.env.EMAIL_FROM || "security@karto.online"}>`,
+      from: `Karto Support Team <${
+        env.EMAIL_FROM || process.env.EMAIL_FROM || "security@karto.online"
+      }>`,
       to: [email],
       subject: "Your Karto Login OTP",
       html: `
@@ -212,20 +220,59 @@ const sendEmailOtp = async (email, code) => {
   }
 };
 
+const deleteExpiredOtps = async () => {
+  try {
+    await prisma.otp.deleteMany({
+      where: {
+        OR: [{ expiresAt: { lt: new Date() } }, { verified: true }],
+      },
+    });
+  } catch (error) {
+    console.warn("OTP cleanup skipped:", error.message);
+  }
+};
+
 export const register = async (req, res) => {
   try {
     const { fullName, email, phone, password } = req.body;
 
-    if (!email || !password) {
+    const normalizedEmail = normalizeEmail(email);
+    const normalizedPhone = normalizePhone(phone);
+
+    if (!fullName || !normalizedEmail || !password) {
       return res.status(400).json({
         success: false,
-        message: "Email and password are required",
+        message: "Full name, email and password are required",
+      });
+    }
+
+    if (String(fullName).trim().length < 2) {
+      return res.status(400).json({
+        success: false,
+        message: "Full name must be at least 2 characters",
+      });
+    }
+
+    if (String(password).length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: "Password must be at least 6 characters",
+      });
+    }
+
+    if (normalizedPhone && !/^[6-9]\d{9}$/.test(normalizedPhone)) {
+      return res.status(400).json({
+        success: false,
+        message: "Enter valid 10 digit phone number",
       });
     }
 
     const existingUser = await prisma.user.findFirst({
       where: {
-        OR: [{ email }, phone ? { phone } : undefined].filter(Boolean),
+        OR: [
+          { email: normalizedEmail },
+          normalizedPhone ? { phone: normalizedPhone } : undefined,
+        ].filter(Boolean),
       },
     });
 
@@ -236,13 +283,13 @@ export const register = async (req, res) => {
       });
     }
 
-    const hashedPassword = await bcrypt.hash(password, 10);
+    const hashedPassword = await bcrypt.hash(String(password), 10);
 
     const user = await prisma.user.create({
       data: {
-        fullName,
-        email,
-        phone,
+        fullName: String(fullName).trim(),
+        email: normalizedEmail,
+        phone: normalizedPhone,
         password: hashedPassword,
         role: "CUSTOMER",
       },
@@ -276,14 +323,18 @@ export const login = async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    if (!email || !password) {
+    const normalizedEmail = normalizeEmail(email);
+
+    if (!normalizedEmail || !password) {
       return res.status(400).json({
         success: false,
         message: "Email and password are required",
       });
     }
 
-    const user = await prisma.user.findUnique({ where: { email } });
+    const user = await prisma.user.findUnique({
+      where: { email: normalizedEmail },
+    });
 
     if (!user || !user.password) {
       return res.status(401).json({
@@ -299,7 +350,7 @@ export const login = async (req, res) => {
       });
     }
 
-    const isPasswordMatch = await bcrypt.compare(password, user.password);
+    const isPasswordMatch = await bcrypt.compare(String(password), user.password);
 
     if (!isPasswordMatch) {
       return res.status(401).json({
@@ -335,7 +386,7 @@ export const login = async (req, res) => {
 export const getMe = async (req, res) => {
   return res.status(200).json({
     success: true,
-    user: req.user,
+    user: safeUser(req.user),
   });
 };
 
@@ -403,6 +454,7 @@ export const logout = async (req, res) => {
       message: "Logout successful",
     });
   } catch (error) {
+    console.error("Logout Error:", error);
     return res.status(500).json({
       success: false,
       message: "Something went wrong",
@@ -414,29 +466,34 @@ export const sendOtp = async (req, res) => {
   try {
     const { email, phone } = req.body;
 
-    if (!email && !phone) {
+    const normalizedEmail = normalizeEmail(email);
+    const normalizedPhone = normalizePhone(phone);
+
+    if (!normalizedEmail && !normalizedPhone) {
       return res.status(400).json({
         success: false,
         message: "Email or phone is required",
       });
     }
 
+    await deleteExpiredOtps();
+
     const code = generateOtp();
 
     await prisma.otp.create({
       data: {
-        email: email || null,
-        phone: phone || null,
+        email: normalizedEmail || null,
+        phone: normalizedPhone || null,
         code,
         expiresAt: new Date(Date.now() + 5 * 60 * 1000),
       },
     });
 
-    if (email) {
-      await sendEmailOtp(email, code);
+    if (normalizedEmail) {
+      await sendEmailOtp(normalizedEmail, code);
     }
 
-    if (phone) {
+    if (normalizedPhone) {
       if (!twilioClient) {
         return res.status(500).json({
           success: false,
@@ -447,7 +504,7 @@ export const sendOtp = async (req, res) => {
       await twilioClient.messages.create({
         body: `Your Karto OTP is ${code}. It is valid for 5 minutes. Do not share it with anyone.`,
         from: env.TWILIO_PHONE_NUMBER || process.env.TWILIO_PHONE_NUMBER,
-        to: phone,
+        to: normalizedPhone,
       });
     }
 
@@ -470,9 +527,12 @@ export const sendOtp = async (req, res) => {
 export const verifyOtp = async (req, res) => {
   try {
     const { email, phone, code, otp, fullName } = req.body;
+
+    const normalizedEmail = normalizeEmail(email);
+    const normalizedPhone = normalizePhone(phone);
     const finalCode = code || otp;
 
-    if ((!email && !phone) || !finalCode) {
+    if ((!normalizedEmail && !normalizedPhone) || !finalCode) {
       return res.status(400).json({
         success: false,
         message: "Email/phone and OTP are required",
@@ -481,12 +541,12 @@ export const verifyOtp = async (req, res) => {
 
     const otpRecord = await prisma.otp.findFirst({
       where: {
-        code: finalCode,
+        code: String(finalCode).trim(),
         verified: false,
         expiresAt: { gt: new Date() },
         OR: [
-          email ? { email } : undefined,
-          phone ? { phone } : undefined,
+          normalizedEmail ? { email: normalizedEmail } : undefined,
+          normalizedPhone ? { phone: normalizedPhone } : undefined,
         ].filter(Boolean),
       },
       orderBy: { createdAt: "desc" },
@@ -507,8 +567,8 @@ export const verifyOtp = async (req, res) => {
     let user = await prisma.user.findFirst({
       where: {
         OR: [
-          email ? { email } : undefined,
-          phone ? { phone } : undefined,
+          normalizedEmail ? { email: normalizedEmail } : undefined,
+          normalizedPhone ? { phone: normalizedPhone } : undefined,
         ].filter(Boolean),
       },
     });
@@ -516,9 +576,14 @@ export const verifyOtp = async (req, res) => {
     if (!user) {
       user = await prisma.user.create({
         data: {
-          fullName: fullName || "Karto User",
-          email: email || `${phone.replace("+", "")}@phone.karto.local`,
-          phone: phone || null,
+          fullName:
+            fullName && String(fullName).trim().length >= 2
+              ? String(fullName).trim()
+              : "Karto User",
+          email:
+            normalizedEmail ||
+            `${String(normalizedPhone).replace("+", "")}@phone.karto.local`,
+          phone: normalizedPhone || null,
           password: "",
           role: "CUSTOMER",
         },
@@ -560,7 +625,7 @@ export const adminOnlyTest = async (req, res) => {
   return res.status(200).json({
     success: true,
     message: "Welcome Admin",
-    user: req.user,
+    user: safeUser(req.user),
   });
 };
 
@@ -572,23 +637,27 @@ export const updateProfile = async (req, res) => {
     const errors = {};
 
     if (fullName !== undefined) {
-      if (!fullName.trim()) {
+      const name = String(fullName).trim();
+
+      if (!name) {
         errors.fullName = "Full name is required";
-      } else if (fullName.trim().length < 2) {
+      } else if (name.length < 2) {
         errors.fullName = "Full name must be at least 2 characters";
-      } else if (fullName.trim().length > 60) {
+      } else if (name.length > 60) {
         errors.fullName = "Full name must be under 60 characters";
       }
     }
 
     if (phone !== undefined && phone !== null && phone !== "") {
-      if (!/^[6-9]\d{9}$/.test(phone)) {
+      const normalizedPhone = normalizePhone(phone);
+
+      if (!/^[6-9]\d{9}$/.test(normalizedPhone)) {
         errors.phone = "Enter valid 10 digit phone number";
       }
     }
 
     if (avatarUrl !== undefined && avatarUrl !== null && avatarUrl !== "") {
-      if (!/^https?:\/\/.+/i.test(avatarUrl)) {
+      if (!/^https?:\/\/.+/i.test(String(avatarUrl).trim())) {
         errors.avatarUrl = "Avatar must be valid URL";
       }
     }
@@ -596,27 +665,46 @@ export const updateProfile = async (req, res) => {
     if (Object.keys(errors).length > 0) {
       return res.status(400).json({
         success: false,
+        message: "Validation failed",
         errors,
       });
     }
 
+    const updateData = {};
+
+    if (fullName !== undefined) {
+      updateData.fullName = String(fullName).trim();
+    }
+
+    if (phone !== undefined) {
+      updateData.phone = phone ? normalizePhone(phone) : null;
+    }
+
+    if (avatarUrl !== undefined) {
+      updateData.avatarUrl = avatarUrl ? String(avatarUrl).trim() : null;
+    }
+
     const updatedUser = await prisma.user.update({
       where: { id: userId },
-      data: {
-        ...(fullName !== undefined && { fullName }),
-        ...(phone !== undefined && { phone: phone || null }),
-        ...(avatarUrl !== undefined && { avatarUrl: avatarUrl || null }),
-      },
+      data: updateData,
     });
 
-    res.json({
+    return res.json({
       success: true,
       message: "Profile updated",
-      user: updatedUser,
+      user: safeUser(updatedUser),
     });
   } catch (error) {
     console.error("Update Profile Error:", error);
-    res.status(500).json({
+
+    if (error.code === "P2002") {
+      return res.status(409).json({
+        success: false,
+        message: "Phone number already exists",
+      });
+    }
+
+    return res.status(500).json({
       success: false,
       message: "Something went wrong",
     });

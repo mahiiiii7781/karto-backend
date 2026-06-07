@@ -331,6 +331,8 @@ model Restaurant {
   ownerMobileNo String? @db.VarChar(20)
 
   address  String  @db.VarChar(255)
+  latitude  Decimal? @db.Decimal(10, 7)
+longitude Decimal? @db.Decimal(10, 7)
   phone    String  @db.VarChar(255)
   email    String  @unique @db.VarChar(255)
   imageUrl String? @db.VarChar(550)
@@ -615,6 +617,7 @@ model Order {
   totalAmount Decimal @db.Decimal(10, 2)
   itemTotal   Decimal @default(0) @db.Decimal(10, 2)
   deliveryFee Decimal @default(5) @db.Decimal(10, 2)
+  distanceKm Decimal? @db.Decimal(10, 2)
   discount    Decimal @default(0) @db.Decimal(10, 2)
   taxAmount   Decimal @default(0) @db.Decimal(10, 2)
 
@@ -625,10 +628,14 @@ model Order {
   orderNumber String @unique @db.VarChar(50)
 
   customerNote String?
+
   cancelReason String?
   cancelledBy  String?
   refundAmount Decimal? @db.Decimal(10, 2)
 
+  deliveryOtp          String?
+deliveryOtpVerified  Boolean  @default(false)
+deliveryOtpExpiresAt DateTime?
   couponId String?
 
   estimatedPreparationMinutes Int?

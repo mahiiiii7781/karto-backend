@@ -2,7 +2,7 @@ import bcrypt from "bcryptjs";
 import prisma from "../prisma.js";
 import { emitOrderStatus } from "../config/socket.js";
 import { uploadToCloudinary } from "../utils/cloudinaryUpload.js";
-
+import {sendPushToUser} from "../services/notification.service.js";
 const allowedRoles = ["CUSTOMER", "VENDOR", "RIDER", "ADMIN"];
 
 const moneyNumber = (value) => Number(value || 0);
@@ -349,6 +349,84 @@ export const deleteUserByAdmin = async (req, res) => {
   }
 };
 
+
+/* =========================
+   ADMIN PROFILE
+========================= */
+
+export const getAdminProfile = async (req, res) => {
+  try {
+    const admin = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: {
+        id: true,
+        fullName: true,
+        email: true,
+        phone: true,
+        avatarUrl: true,
+        role: true,
+        isActive: true,
+        createdAt: true,
+      },
+    });
+
+    if (!admin) {
+      return res.status(404).json({ success: false, message: "Admin not found" });
+    }
+
+    return res.json({ success: true, user: admin, admin, data: admin });
+  } catch (error) {
+    console.error("Get Admin Profile Error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const updateAdminProfile = async (req, res) => {
+  try {
+    const { fullName, phone, password, avatarUrl, imageUrl } = req.body;
+    const finalAvatarUrl = await fileUrl(req, "admin-profile");
+
+    const updateData = {
+      ...(fullName !== undefined && { fullName: cleanString(fullName) }),
+      ...(phone !== undefined && { phone: cleanString(phone) || null }),
+      ...(password ? { password: await bcrypt.hash(password, 10) } : {}),
+      ...(finalAvatarUrl && { avatarUrl: finalAvatarUrl }),
+      ...(!finalAvatarUrl && avatarUrl !== undefined && { avatarUrl: avatarUrl || null }),
+      ...(!finalAvatarUrl && imageUrl !== undefined && { avatarUrl: imageUrl || null }),
+    };
+
+    if (!Object.keys(updateData).length) {
+      return res.status(400).json({ success: false, message: "No valid profile fields provided" });
+    }
+
+    const admin = await prisma.user.update({
+      where: { id: req.user.id },
+      data: updateData,
+      select: {
+        id: true,
+        fullName: true,
+        email: true,
+        phone: true,
+        avatarUrl: true,
+        role: true,
+        isActive: true,
+        createdAt: true,
+      },
+    });
+
+    return res.json({
+      success: true,
+      message: "Admin profile updated successfully",
+      user: admin,
+      admin,
+      data: admin,
+    });
+  } catch (error) {
+    console.error("Update Admin Profile Error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 /* =========================
    CITIES
 ========================= */
@@ -390,8 +468,11 @@ export const createCity = async (req, res) => {
 
 export const getCities = async (req, res) => {
   try {
+    const { includeInactive } = req.query;
+    const shouldIncludeInactive = boolValue(includeInactive, false);
+
     const cities = await prisma.city.findMany({
-      where: { isActive: true },
+      where: shouldIncludeInactive ? {} : { isActive: true },
       orderBy: { name: "asc" },
     });
 
@@ -952,12 +1033,13 @@ export const deleteVendorCategory = async (req, res) => {
 
 export const getVendorSubCategories = async (req, res) => {
   try {
-    const { vendorCategoryId, restaurantId } = req.query;
+    const { vendorCategoryId, categoryId, restaurantId } = req.query;
+    const finalVendorCategoryId = vendorCategoryId || categoryId;
 
-    const data = await prisma.vendorSubCategory.findMany({
+    const raw = await prisma.vendorSubCategory.findMany({
       where: {
-        ...(vendorCategoryId && vendorCategoryId !== "ALL"
-          ? { vendorCategoryId }
+        ...(finalVendorCategoryId && finalVendorCategoryId !== "ALL"
+          ? { vendorCategoryId: finalVendorCategoryId }
           : {}),
         ...(restaurantId && restaurantId !== "ALL"
           ? { vendorCategory: { restaurantId } }
@@ -974,6 +1056,14 @@ export const getVendorSubCategories = async (req, res) => {
       orderBy: { createdAt: "desc" },
     });
 
+    const data = raw.map((item) => ({
+      ...item,
+      categoryId: item.vendorCategoryId,
+      category: item.vendorCategory,
+      restaurantId: item.vendorCategory?.restaurantId,
+      restaurant: item.vendorCategory?.restaurant,
+    }));
+
     return res.json({ success: true, subCategories: data, data });
   } catch (error) {
     console.error("Get Vendor Subcategories Error:", error);
@@ -983,17 +1073,18 @@ export const getVendorSubCategories = async (req, res) => {
 
 export const createVendorSubCategory = async (req, res) => {
   try {
-    const { vendorCategoryId, name, description, imageUrl } = req.body;
+    const { vendorCategoryId, categoryId, name, description, imageUrl } = req.body;
+    const finalVendorCategoryId = vendorCategoryId || categoryId;
 
-    if (!vendorCategoryId || !name?.trim()) {
+    if (!finalVendorCategoryId || !name?.trim()) {
       return res.status(400).json({
         success: false,
-        message: "vendorCategoryId and name are required",
+        message: "vendorCategoryId/categoryId and name are required",
       });
     }
 
     const vendorCategory = await prisma.vendorCategory.findUnique({
-      where: { id: vendorCategoryId },
+      where: { id: finalVendorCategoryId },
     });
 
     if (!vendorCategory) {
@@ -1006,19 +1097,29 @@ export const createVendorSubCategory = async (req, res) => {
     const finalImageUrl =
       (await fileUrl(req, "vendor-subcategories")) || imageUrl || null;
 
-    const data = await prisma.vendorSubCategory.create({
+    const raw = await prisma.vendorSubCategory.create({
       data: {
-        vendorCategoryId,
+        vendorCategoryId: finalVendorCategoryId,
         name: name.trim(),
         description: description?.trim() || null,
         imageUrl: finalImageUrl,
         isActive: true,
       },
       include: {
-        vendorCategory: true,
+        vendorCategory: {
+          include: { restaurant: true },
+        },
         menuItems: true,
       },
     });
+
+    const data = {
+      ...raw,
+      categoryId: raw.vendorCategoryId,
+      category: raw.vendorCategory,
+      restaurantId: raw.vendorCategory?.restaurantId,
+      restaurant: raw.vendorCategory?.restaurant,
+    };
 
     return res.status(201).json({
       success: true,
@@ -1035,14 +1136,25 @@ export const createVendorSubCategory = async (req, res) => {
 export const updateVendorSubCategory = async (req, res) => {
   try {
     const { id } = req.params;
-    const { vendorCategoryId, name, description, imageUrl, isActive } = req.body;
+    const { vendorCategoryId, categoryId, name, description, imageUrl, isActive } = req.body;
+    const finalVendorCategoryId = vendorCategoryId || categoryId;
+
+    if (finalVendorCategoryId) {
+      const vendorCategory = await prisma.vendorCategory.findUnique({
+        where: { id: finalVendorCategoryId },
+      });
+
+      if (!vendorCategory) {
+        return res.status(404).json({ success: false, message: "Vendor category not found" });
+      }
+    }
 
     const finalImageUrl = await fileUrl(req, "vendor-subcategories");
 
-    const data = await prisma.vendorSubCategory.update({
+    const raw = await prisma.vendorSubCategory.update({
       where: { id },
       data: {
-        ...(vendorCategoryId !== undefined && { vendorCategoryId }),
+        ...(finalVendorCategoryId !== undefined && { vendorCategoryId: finalVendorCategoryId }),
         ...(name !== undefined && { name: name.trim() }),
         ...(description !== undefined && {
           description: description?.trim() || null,
@@ -1053,10 +1165,20 @@ export const updateVendorSubCategory = async (req, res) => {
           imageUrl !== undefined && { imageUrl: imageUrl || null }),
       },
       include: {
-        vendorCategory: true,
+        vendorCategory: {
+          include: { restaurant: true },
+        },
         menuItems: true,
       },
     });
+
+    const data = {
+      ...raw,
+      categoryId: raw.vendorCategoryId,
+      category: raw.vendorCategory,
+      restaurantId: raw.vendorCategory?.restaurantId,
+      restaurant: raw.vendorCategory?.restaurant,
+    };
 
     return res.json({
       success: true,
@@ -1303,6 +1425,49 @@ export const updateRiderByAdmin = async (req, res) => {
     });
   } catch (error) {
     console.error("Update Rider Error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+
+export const toggleRiderActiveStatus = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { isActive } = req.body;
+
+    const rider = await prisma.user.findFirst({ where: { id, role: "RIDER" } });
+
+    if (!rider) {
+      return res.status(404).json({ success: false, message: "Rider not found" });
+    }
+
+    const data = await prisma.user.update({
+      where: { id },
+      data: { isActive: boolValue(isActive) },
+      select: {
+        id: true,
+        fullName: true,
+        email: true,
+        phone: true,
+        avatarUrl: true,
+        role: true,
+        isActive: true,
+        cityId: true,
+        address: true,
+        vehicleNo: true,
+        vehicleType: true,
+        createdAt: true,
+      },
+    });
+
+    return res.json({
+      success: true,
+      message: data.isActive ? "Rider activated" : "Rider blocked",
+      rider: data,
+      data,
+    });
+  } catch (error) {
+    console.error("Toggle Rider Status Error:", error);
     return res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -1910,13 +2075,19 @@ export const deleteMenuItem = async (req, res) => {
 export const createMenuItemAddon = async (req, res) => {
   try {
     const { menuItemId } = req.params;
-    const { title, price, imageUrl, isActive = true } = req.body;
+    const { title, name, price, imageUrl, isActive = true } = req.body;
+    const finalTitle = title || name;
 
-    if (!title?.trim()) {
+    if (!finalTitle?.trim()) {
       return res.status(400).json({
         success: false,
-        message: "Addon title is required",
+        message: "Addon title/name is required",
       });
+    }
+
+    const menuItem = await prisma.menuItem.findUnique({ where: { id: menuItemId } });
+    if (!menuItem) {
+      return res.status(404).json({ success: false, message: "Menu item not found" });
     }
 
     const finalImageUrl = (await fileUrl(req, "addons")) || imageUrl || null;
@@ -1924,10 +2095,10 @@ export const createMenuItemAddon = async (req, res) => {
     const addon = await prisma.menuItemAddon.create({
       data: {
         menuItemId,
-        title: title.trim(),
+        title: finalTitle.trim(),
         price: Number(price || 0),
         imageUrl: finalImageUrl,
-        isActive: boolValue(isActive),
+        isActive: boolValue(isActive, true),
       },
     });
 
@@ -1946,12 +2117,13 @@ export const createMenuItemAddon = async (req, res) => {
 export const updateMenuItemAddon = async (req, res) => {
   try {
     const { id } = req.params;
-    const { title, price, imageUrl, isActive } = req.body;
+    const { title, name, price, imageUrl, isActive } = req.body;
+    const finalTitle = title || name;
 
     const finalImageUrl = await fileUrl(req, "addons");
 
     const updateData = {
-      ...(title !== undefined && { title: title.trim() }),
+      ...(finalTitle !== undefined && { title: finalTitle.trim() }),
       ...(price !== undefined && { price: Number(price || 0) }),
       ...(isActive !== undefined && { isActive: boolValue(isActive) }),
       ...(finalImageUrl && { imageUrl: finalImageUrl }),
@@ -1998,22 +2170,28 @@ export const deleteMenuItemAddon = async (req, res) => {
 export const createMenuItemCustomization = async (req, res) => {
   try {
     const { menuItemId } = req.params;
-    const { title, price, isRequired = false, isActive = true } = req.body;
+    const { title, name, price, isRequired = false, required, isActive = true } = req.body;
+    const finalTitle = title || name;
 
-    if (!title?.trim()) {
+    if (!finalTitle?.trim()) {
       return res.status(400).json({
         success: false,
-        message: "Customization title is required",
+        message: "Customization title/name is required",
       });
+    }
+
+    const menuItem = await prisma.menuItem.findUnique({ where: { id: menuItemId } });
+    if (!menuItem) {
+      return res.status(404).json({ success: false, message: "Menu item not found" });
     }
 
     const customization = await prisma.menuItemCustomization.create({
       data: {
         menuItemId,
-        title: title.trim(),
+        title: finalTitle.trim(),
         price: Number(price || 0),
-        isRequired: boolValue(isRequired),
-        isActive: boolValue(isActive),
+        isRequired: boolValue(isRequired ?? required),
+        isActive: boolValue(isActive, true),
       },
     });
 
@@ -2032,14 +2210,17 @@ export const createMenuItemCustomization = async (req, res) => {
 export const updateMenuItemCustomization = async (req, res) => {
   try {
     const { id } = req.params;
-    const { title, price, isRequired, isActive } = req.body;
+    const { title, name, price, isRequired, required, isActive } = req.body;
+    const finalTitle = title || name;
 
     const customization = await prisma.menuItemCustomization.update({
       where: { id },
       data: {
-        ...(title !== undefined && { title: title.trim() }),
+        ...(finalTitle !== undefined && { title: finalTitle.trim() }),
         ...(price !== undefined && { price: Number(price || 0) }),
-        ...(isRequired !== undefined && { isRequired: boolValue(isRequired) }),
+        ...((isRequired !== undefined || required !== undefined) && {
+          isRequired: boolValue(isRequired ?? required),
+        }),
         ...(isActive !== undefined && { isActive: boolValue(isActive) }),
       },
     });
@@ -2366,10 +2547,15 @@ export const createCoupon = async (req, res) => {
       discountValue,
       minOrderAmount = 0,
       maxDiscountAmount,
+      maxDiscount,
       startDate,
+      startsAt,
       endDate,
+      expiresAt,
       usageLimit,
-      perUserLimit = 1,
+      perUserLimit,
+      userUsageLimit,
+      audience,
       isActive = true,
     } = req.body;
 
@@ -2380,21 +2566,27 @@ export const createCoupon = async (req, res) => {
       });
     }
 
+    const finalMaxDiscount = maxDiscountAmount ?? maxDiscount;
+    const finalStartDate = startDate ?? startsAt;
+    const finalEndDate = endDate ?? expiresAt;
+    const finalPerUserLimit = perUserLimit ?? userUsageLimit ?? 1;
+
     const coupon = await prisma.coupon.create({
       data: {
         code: code.trim().toUpperCase(),
         ...(title !== undefined && { title: title?.trim() || code.trim().toUpperCase() }),
         ...(description !== undefined && { description: description?.trim() || null }),
+        ...(audience !== undefined && { audience }),
         discountType,
         discountValue: Number(discountValue),
         minOrderAmount: Number(minOrderAmount || 0),
-        ...(maxDiscountAmount !== undefined && {
-          maxDiscountAmount: maxDiscountAmount ? Number(maxDiscountAmount) : null,
+        ...(finalMaxDiscount !== undefined && {
+          maxDiscountAmount: finalMaxDiscount ? Number(finalMaxDiscount) : null,
         }),
-        ...(startDate && { startDate: new Date(startDate) }),
-        ...(endDate && { endDate: new Date(endDate) }),
+        ...(finalStartDate && { startDate: new Date(finalStartDate) }),
+        ...(finalEndDate && { endDate: new Date(finalEndDate) }),
         ...(usageLimit !== undefined && { usageLimit: usageLimit ? Number(usageLimit) : null }),
-        ...(perUserLimit !== undefined && { perUserLimit: Number(perUserLimit || 1) }),
+        ...(finalPerUserLimit !== undefined && { perUserLimit: Number(finalPerUserLimit || 1) }),
         isActive: boolValue(isActive, true),
       },
     });
@@ -2429,12 +2621,22 @@ export const updateCoupon = async (req, res) => {
       discountValue,
       minOrderAmount,
       maxDiscountAmount,
+      maxDiscount,
       startDate,
+      startsAt,
       endDate,
+      expiresAt,
       usageLimit,
       perUserLimit,
+      userUsageLimit,
+      audience,
       isActive,
     } = req.body;
+
+    const finalMaxDiscount = maxDiscountAmount ?? maxDiscount;
+    const finalStartDate = startDate ?? startsAt;
+    const finalEndDate = endDate ?? expiresAt;
+    const finalPerUserLimit = perUserLimit ?? userUsageLimit;
 
     const coupon = await prisma.coupon.update({
       where: { id },
@@ -2442,16 +2644,17 @@ export const updateCoupon = async (req, res) => {
         ...(code !== undefined && { code: code.trim().toUpperCase() }),
         ...(title !== undefined && { title: title?.trim() || null }),
         ...(description !== undefined && { description: description?.trim() || null }),
+        ...(audience !== undefined && { audience }),
         ...(discountType !== undefined && { discountType }),
         ...(discountValue !== undefined && { discountValue: Number(discountValue) }),
         ...(minOrderAmount !== undefined && { minOrderAmount: Number(minOrderAmount || 0) }),
-        ...(maxDiscountAmount !== undefined && {
-          maxDiscountAmount: maxDiscountAmount ? Number(maxDiscountAmount) : null,
+        ...(finalMaxDiscount !== undefined && {
+          maxDiscountAmount: finalMaxDiscount ? Number(finalMaxDiscount) : null,
         }),
-        ...(startDate !== undefined && { startDate: startDate ? new Date(startDate) : null }),
-        ...(endDate !== undefined && { endDate: endDate ? new Date(endDate) : null }),
+        ...(finalStartDate !== undefined && { startDate: finalStartDate ? new Date(finalStartDate) : null }),
+        ...(finalEndDate !== undefined && { endDate: finalEndDate ? new Date(finalEndDate) : null }),
         ...(usageLimit !== undefined && { usageLimit: usageLimit ? Number(usageLimit) : null }),
-        ...(perUserLimit !== undefined && { perUserLimit: Number(perUserLimit || 1) }),
+        ...(finalPerUserLimit !== undefined && { perUserLimit: Number(finalPerUserLimit || 1) }),
         ...(isActive !== undefined && { isActive: boolValue(isActive) }),
       },
     });
@@ -2601,71 +2804,231 @@ export const deleteCity = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const city = await prisma.city.findUnique({
-      where: { id },
-    });
+    const city = await prisma.city.findUnique({ where: { id } });
 
     if (!city) {
-      return res.status(404).json({
-        success: false,
-        message: "City not found",
-      });
+      return res.status(404).json({ success: false, message: "City not found" });
     }
 
-    await prisma.city.delete({
-      where: { id },
-    });
+    try {
+      await prisma.city.delete({ where: { id } });
+      return res.json({ success: true, message: "City deleted successfully" });
+    } catch (deleteError) {
+      if (deleteError?.code !== "P2003") throw deleteError;
 
-    return res.status(200).json({
-      success: true,
-      message: "City deleted successfully",
-    });
+      const updated = await prisma.city.update({
+        where: { id },
+        data: { isActive: false },
+      });
+
+      return res.json({
+        success: true,
+        message: "City has linked records, so it was deactivated safely",
+        city: updated,
+        data: updated,
+      });
+    }
   } catch (error) {
     console.error("Delete City Error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Something went wrong while deleting city",
-      error: error.message,
-    });
+    return res.status(500).json({ success: false, message: error.message });
   }
 };
 export const updateCity = async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, stateId, isActive } = req.body;
+    const { name, code, stateId, isActive } = req.body;
 
-    const city = await prisma.city.findUnique({
-      where: { id },
-    });
+    const city = await prisma.city.findUnique({ where: { id } });
 
     if (!city) {
-      return res.status(404).json({
-        success: false,
-        message: "City not found",
-      });
+      return res.status(404).json({ success: false, message: "City not found" });
     }
 
     const updatedCity = await prisma.city.update({
       where: { id },
       data: {
-        ...(name !== undefined && { name }),
+        ...(name !== undefined && { name: cleanString(name) }),
+        ...(code !== undefined && { code: cleanString(code)?.toUpperCase() }),
         ...(stateId !== undefined && { stateId }),
-        ...(isActive !== undefined && { isActive }),
+        ...(isActive !== undefined && { isActive: boolValue(isActive) }),
       },
     });
 
-    return res.status(200).json({
+    return res.json({
       success: true,
       message: "City updated successfully",
       city: updatedCity,
+      data: updatedCity,
     });
   } catch (error) {
     console.error("Update City Error:", error);
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
+/* =========================
+   ADMIN NOTIFICATIONS
+========================= */
 
+const notificationAllowedTypes = [
+  "ORDER",
+  "PAYMENT",
+  "OFFER",
+  "SUPPORT",
+  "REFERRAL",
+  "WALLET",
+  "SYSTEM",
+];
+
+export const getAdminNotifications = async (req, res) => {
+  try {
+    const notifications = await prisma.notification.findMany({
+      take: 150,
+      orderBy: { createdAt: "desc" },
+      include: {
+        user: {
+          select: {
+            id: true,
+            fullName: true,
+            email: true,
+            phone: true,
+            role: true,
+            cityId: true,
+          },
+        },
+      },
+    });
+
+    return res.json({
+      success: true,
+      notifications,
+      data: notifications,
+    });
+  } catch (error) {
+    console.error("Get Admin Notifications Error:", error);
     return res.status(500).json({
       success: false,
-      message: "Something went wrong while updating city",
-      error: error.message,
+      message: error.message || "Something went wrong",
+    });
+  }
+};
+
+export const sendAdminNotification = async (req, res) => {
+  try {
+    const {
+      title,
+      body,
+      target = "ALL",
+      role,
+      userId,
+      cityId,
+      type = "OFFER",
+      imageUrl,
+      deepLink,
+    } = req.body;
+
+    if (!title?.trim() || !body?.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "title and body are required",
+      });
+    }
+
+    if (!notificationAllowedTypes.includes(type)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid notification type",
+      });
+    }
+
+    const where = {
+      isActive: true,
+      ...(target === "USER" && userId ? { id: userId } : {}),
+      ...(target === "ROLE" && role ? { role } : {}),
+      ...(target === "CITY" && cityId ? { cityId } : {}),
+    };
+
+    const users = await prisma.user.findMany({
+      where,
+      select: {
+        id: true,
+        fullName: true,
+        role: true,
+        cityId: true,
+      },
+    });
+
+    if (!users.length) {
+      return res.status(404).json({
+        success: false,
+        message: "No active users found for this target",
+      });
+    }
+
+    const cleanTitle = title.trim();
+    const cleanBody = body.trim();
+
+    const dataPayload = {
+      source: "ADMIN",
+      target,
+      role: role || null,
+      cityId: cityId || null,
+      imageUrl: imageUrl || null,
+      deepLink: deepLink || null,
+      sentBy: req.user?.id || null,
+    };
+
+    await prisma.notification.createMany({
+      data: users.map((user) => ({
+        userId: user.id,
+        type,
+        title: cleanTitle,
+        body: cleanBody,
+        data: dataPayload,
+        isRead: false,
+      })),
+    });
+
+    let sent = 0;
+    let failed = 0;
+
+    await Promise.allSettled(
+      users.map(async (user) => {
+        try {
+          await sendPushToUser({
+            userId: user.id,
+            type,
+            title: cleanTitle,
+            body: cleanBody,
+            data: dataPayload,
+            saveToDb: false,
+          });
+
+          sent += 1;
+        } catch (error) {
+          failed += 1;
+          console.error("Admin Push Error:", error.message);
+        }
+      })
+    );
+
+    return res.status(201).json({
+      success: true,
+      message: "Notification sent successfully",
+      data: {
+        totalUsers: users.length,
+        sent,
+        failed,
+        title: cleanTitle,
+        body: cleanBody,
+        type,
+        target,
+      },
+    });
+  } catch (error) {
+    console.error("Send Admin Notification Error:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Something went wrong",
     });
   }
 };
