@@ -111,6 +111,29 @@ const orderInclude = {
   },
 };
 
+
+const pickFirstDefined = (...values) => {
+  for (const value of values) {
+    if (value !== undefined) return value;
+  }
+  return undefined;
+};
+
+const normalizeNullableString = (value) => {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  const text = String(value).trim();
+  return text.length ? text : null;
+};
+
+const menuItemInclude = {
+  category: true,
+  subCategory: true,
+  vendorCategory: true,
+  vendorSubCategory: true,
+  restaurant: true,
+};
+
 const emitVendorRefreshSafe = (vendorId, payload = {}) => {
   try {
     if (emitVendorDashboardRefresh) {
@@ -815,32 +838,36 @@ export const assignVendorOrderRider = async (req, res) => {
 
 export const getVendorMenu = async (req, res) => {
   try {
-    const { search, categoryId, available } = req.query;
+    const { search, categoryId, category_id, vendorCategoryId, vendor_category_id, restaurantId, restaurant_id, available } = req.query;
 
     const restaurantIds = await getVendorRestaurantIds(req.user.id);
+    const finalRestaurantId = restaurantId || restaurant_id;
+    const finalCategoryId = categoryId || category_id || vendorCategoryId || vendor_category_id;
 
     const where = {
-      restaurantId: { in: restaurantIds },
-      ...(categoryId && { vendorCategoryId: categoryId }),
+      restaurantId: finalRestaurantId && restaurantIds.includes(String(finalRestaurantId))
+        ? String(finalRestaurantId)
+        : { in: restaurantIds },
+      ...(finalCategoryId && {
+        OR: [
+          { vendorCategoryId: String(finalCategoryId) },
+          { categoryId: String(finalCategoryId) },
+        ],
+      }),
       ...(available !== undefined && {
         isAvailable: normalizeBool(available),
       }),
       ...(search && {
         OR: [
-          { name: { contains: search, mode: "insensitive" } },
-          { description: { contains: search, mode: "insensitive" } },
+          { name: { contains: String(search), mode: "insensitive" } },
+          { description: { contains: String(search), mode: "insensitive" } },
         ],
       }),
     };
 
     const items = await prisma.menuItem.findMany({
       where,
-      include: {
-        category: true,
-        subCategory: true,
-        vendorCategory: true,
-        vendorSubCategory: true,
-      },
+      include: menuItemInclude,
       orderBy: [
         { isBestSeller: "desc" },
         { isPopular: "desc" },
@@ -866,16 +893,17 @@ export const getVendorMenu = async (req, res) => {
 
 export const createVendorMenuItem = async (req, res) => {
   try {
-  const requestedRestaurantId = req.body.restaurantId || req.body.restaurant_id;
+    const requestedRestaurantId = req.body.restaurantId || req.body.restaurant_id;
 
-const restaurant = requestedRestaurantId
-  ? await prisma.restaurant.findFirst({
-      where: {
-        id: requestedRestaurantId,
-        vendorId: req.user.id,
-      },
-    })
-  : await getPrimaryRestaurant(req.user.id);
+    const restaurant = requestedRestaurantId
+      ? await prisma.restaurant.findFirst({
+          where: {
+            id: String(requestedRestaurantId),
+            vendorId: req.user.id,
+          },
+        })
+      : await getPrimaryRestaurant(req.user.id);
+
     if (!restaurant) {
       return res.status(404).json({
         success: false,
@@ -887,53 +915,84 @@ const restaurant = requestedRestaurantId
       name,
       description,
       price,
-      imageUrl,
       isVeg,
+      is_veg,
       isVegetarian,
+      is_vegetarian,
       isPopular,
+      is_popular,
       isBestSeller,
+      is_best_seller,
       isAvailable,
+      is_available,
       prepTimeMin,
+      prep_time_min,
       categoryId,
+      category_id,
       subCategoryId,
+      sub_category_id,
       vendorCategoryId,
+      vendor_category_id,
       vendorSubCategoryId,
+      vendor_sub_category_id,
+      imageUrl,
+      image_url,
     } = req.body;
 
-    if (!name || price === undefined || price === null) {
+    if (!name || price === undefined || price === null || Number(price) <= 0) {
       return res.status(400).json({
         success: false,
-        message: "Name and price are required",
+        message: "Name and valid price are required",
       });
+    }
+
+    const finalVendorCategoryId = pickFirstDefined(vendorCategoryId, vendor_category_id, categoryId, category_id);
+    const finalGlobalCategoryId = pickFirstDefined(categoryId, category_id);
+    const finalSubCategoryId = pickFirstDefined(subCategoryId, sub_category_id);
+    const finalVendorSubCategoryId = pickFirstDefined(vendorSubCategoryId, vendor_sub_category_id);
+    const finalImageUrl = pickFirstDefined(imageUrl, image_url, req.file?.path, null);
+    const veg = pickFirstDefined(isVeg, is_veg, isVegetarian, is_vegetarian, true);
+    const popular = pickFirstDefined(isPopular, is_popular, false);
+    const bestSeller = pickFirstDefined(isBestSeller, is_best_seller, false);
+    const available = pickFirstDefined(isAvailable, is_available, true);
+    const prep = pickFirstDefined(prepTimeMin, prep_time_min, 20);
+
+    if (finalVendorCategoryId) {
+      const category = await prisma.vendorCategory.findFirst({
+        where: {
+          id: String(finalVendorCategoryId),
+          restaurantId: restaurant.id,
+        },
+        select: { id: true },
+      });
+
+      if (!category) {
+        return res.status(400).json({
+          success: false,
+          message: "Selected category does not belong to this restaurant",
+        });
+      }
     }
 
     const item = await prisma.menuItem.create({
       data: {
         restaurantId: restaurant.id,
         name: String(name).trim(),
-        description: description || null,
+        description: normalizeNullableString(description),
         price: Number(price),
-        imageUrl: imageUrl || req.file?.path || null,
-        isVeg: normalizeBool(isVeg, true),
-        isVegetarian:
-          isVegetarian === undefined
-            ? normalizeBool(isVeg, true)
-            : normalizeBool(isVegetarian, true),
-        isPopular: normalizeBool(isPopular),
-        isBestSeller: normalizeBool(isBestSeller),
-        isAvailable: normalizeBool(isAvailable, true),
-        prepTimeMin: Number(prepTimeMin) || 20,
-        categoryId: categoryId || null,
-        subCategoryId: subCategoryId || null,
-        vendorCategoryId: vendorCategoryId || null,
-        vendorSubCategoryId: vendorSubCategoryId || null,
+        imageUrl: finalImageUrl,
+        isVeg: normalizeBool(veg, true),
+        isVegetarian: normalizeBool(veg, true),
+        isPopular: normalizeBool(popular),
+        isBestSeller: normalizeBool(bestSeller),
+        isAvailable: normalizeBool(available, true),
+        prepTimeMin: Number(prep) || 20,
+        categoryId: finalGlobalCategoryId && !finalVendorCategoryId ? String(finalGlobalCategoryId) : null,
+        subCategoryId: finalSubCategoryId ? String(finalSubCategoryId) : null,
+        vendorCategoryId: finalVendorCategoryId ? String(finalVendorCategoryId) : null,
+        vendorSubCategoryId: finalVendorSubCategoryId ? String(finalVendorSubCategoryId) : null,
       },
-      include: {
-        category: true,
-        subCategory: true,
-        vendorCategory: true,
-        vendorSubCategory: true,
-      },
+      include: menuItemInclude,
     });
 
     emitVendorRefreshSafe(req.user.id, {
@@ -946,6 +1005,7 @@ const restaurant = requestedRestaurantId
       message: "Menu item created",
       data: item,
       item,
+      menuItem: item,
     });
   } catch (error) {
     console.error("Create Vendor Menu Item Error:", error);
@@ -976,58 +1036,84 @@ export const updateVendorMenuItem = async (req, res) => {
       });
     }
 
-    const allowedFields = [
-      "name",
-      "description",
-      "price",
-      "imageUrl",
-      "isVeg",
-      "isVegetarian",
-      "isPopular",
-      "isBestSeller",
-      "isAvailable",
-      "prepTimeMin",
-      "categoryId",
-      "subCategoryId",
-      "vendorCategoryId",
-      "vendorSubCategoryId",
-    ];
-
+    const body = req.body || {};
     const data = {};
 
-    for (const field of allowedFields) {
-      if (req.body[field] !== undefined) {
-        data[field] = req.body[field];
+    if (body.name !== undefined) data.name = String(body.name).trim();
+    if (body.description !== undefined) data.description = normalizeNullableString(body.description);
+    if (body.price !== undefined) data.price = Number(body.price);
+
+    const image = pickFirstDefined(body.imageUrl, body.image_url, req.file?.path);
+    if (image !== undefined) data.imageUrl = image;
+
+    const prep = pickFirstDefined(body.prepTimeMin, body.prep_time_min);
+    if (prep !== undefined) data.prepTimeMin = Number(prep) || 20;
+
+    const veg = pickFirstDefined(body.isVeg, body.is_veg, body.isVegetarian, body.is_vegetarian);
+    if (veg !== undefined) {
+      data.isVeg = normalizeBool(veg, true);
+      data.isVegetarian = normalizeBool(veg, true);
+    }
+
+    const popular = pickFirstDefined(body.isPopular, body.is_popular);
+    if (popular !== undefined) data.isPopular = normalizeBool(popular);
+
+    const bestSeller = pickFirstDefined(body.isBestSeller, body.is_best_seller);
+    if (bestSeller !== undefined) data.isBestSeller = normalizeBool(bestSeller);
+
+    const available = pickFirstDefined(body.isAvailable, body.is_available);
+    if (available !== undefined) data.isAvailable = normalizeBool(available, true);
+
+    const requestedRestaurantId = body.restaurantId || body.restaurant_id;
+    if (requestedRestaurantId !== undefined && String(requestedRestaurantId) !== existing.restaurantId) {
+      if (!restaurantIds.includes(String(requestedRestaurantId))) {
+        return res.status(400).json({
+          success: false,
+          message: "Selected restaurant does not belong to this vendor",
+        });
       }
+      data.restaurantId = String(requestedRestaurantId);
     }
 
-    if (req.file?.path) {
-      data.imageUrl = req.file.path;
-    }
+    const finalRestaurantId = data.restaurantId || existing.restaurantId;
+    const finalVendorCategoryId = pickFirstDefined(body.vendorCategoryId, body.vendor_category_id, body.categoryId, body.category_id);
+    if (finalVendorCategoryId !== undefined) {
+      if (finalVendorCategoryId) {
+        const category = await prisma.vendorCategory.findFirst({
+          where: {
+            id: String(finalVendorCategoryId),
+            restaurantId: finalRestaurantId,
+          },
+          select: { id: true },
+        });
 
-    if (data.name !== undefined) data.name = String(data.name).trim();
-    if (data.price !== undefined) data.price = Number(data.price);
-    if (data.prepTimeMin !== undefined) {
-      data.prepTimeMin = Number(data.prepTimeMin) || 20;
-    }
-
-    ["isVeg", "isVegetarian", "isPopular", "isBestSeller", "isAvailable"].forEach(
-      (field) => {
-        if (data[field] !== undefined) {
-          data[field] = normalizeBool(data[field]);
+        if (!category) {
+          return res.status(400).json({
+            success: false,
+            message: "Selected category does not belong to this restaurant",
+          });
         }
+        data.vendorCategoryId = String(finalVendorCategoryId);
+        data.categoryId = null;
+      } else {
+        data.vendorCategoryId = null;
       }
-    );
+    }
+
+    const vendorSubCategoryId = pickFirstDefined(body.vendorSubCategoryId, body.vendor_sub_category_id);
+    if (vendorSubCategoryId !== undefined) {
+      data.vendorSubCategoryId = vendorSubCategoryId ? String(vendorSubCategoryId) : null;
+    }
+
+    const subCategoryId = pickFirstDefined(body.subCategoryId, body.sub_category_id);
+    if (subCategoryId !== undefined) {
+      data.subCategoryId = subCategoryId ? String(subCategoryId) : null;
+    }
 
     const updated = await prisma.menuItem.update({
       where: { id },
       data,
-      include: {
-        category: true,
-        subCategory: true,
-        vendorCategory: true,
-        vendorSubCategory: true,
-      },
+      include: menuItemInclude,
     });
 
     emitVendorRefreshSafe(req.user.id, {
@@ -1040,6 +1126,7 @@ export const updateVendorMenuItem = async (req, res) => {
       message: "Menu item updated",
       data: updated,
       item: updated,
+      menuItem: updated,
     });
   } catch (error) {
     console.error("Update Vendor Menu Item Error:", error);
@@ -1381,6 +1468,7 @@ export const getVendorProfile = async (req, res) => {
         city: true,
         category: true,
         timings: true,
+        vendorCategories: true,
       },
     });
 
@@ -1404,7 +1492,7 @@ export const updateVendorSettings = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const restaurant = id
+    const restaurant = id && id !== "me"
       ? await prisma.restaurant.findFirst({
           where: { id, vendorId: req.user.id },
         })
@@ -1417,80 +1505,67 @@ export const updateVendorSettings = async (req, res) => {
       });
     }
 
-    const {
-      name,
-      phone,
-      address,
-      deliveryTime,
-      minimumOrder,
-      isOpen,
-      isAcceptingOrders,
-      defaultPrepTime,
-      openingTime,
-      closingTime,
-      weeklyOffDay,
-
-      // Restaurant media
-      imageUrl,
-      image_url,
-      logoUrl,
-      logo_url,
-      bannerUrl,
-      banner_url,
-      coverUrl,
-      cover_url,
-    } = req.body;
-
+    const body = req.body || {};
     const data = {};
 
-    if (name !== undefined) data.name = String(name).trim();
-    if (phone !== undefined) data.phone = String(phone).trim();
-    if (address !== undefined) data.address = String(address).trim();
-    if (deliveryTime !== undefined) data.deliveryTime = String(deliveryTime);
-    if (minimumOrder !== undefined) data.minimumOrder = Number(minimumOrder);
-    if (isOpen !== undefined) data.isOpen = normalizeBool(isOpen);
-    if (isAcceptingOrders !== undefined) {
-      data.isAcceptingOrders = normalizeBool(isAcceptingOrders);
+    if (body.name !== undefined) data.name = String(body.name).trim();
+    if (body.phone !== undefined) data.phone = String(body.phone).trim();
+    if (body.email !== undefined) data.email = String(body.email).trim();
+    if (body.address !== undefined) data.address = String(body.address).trim();
+    if (body.deliveryTime !== undefined || body.delivery_time !== undefined) {
+      data.deliveryTime = String(body.deliveryTime ?? body.delivery_time);
     }
-    if (defaultPrepTime !== undefined) {
-      data.defaultPrepTime = Number(defaultPrepTime) || 30;
+    if (body.minimumOrder !== undefined || body.minimum_order !== undefined) {
+      data.minimumOrder = Number(body.minimumOrder ?? body.minimum_order);
     }
-    if (openingTime !== undefined) data.openingTime = String(openingTime);
-    if (closingTime !== undefined) data.closingTime = String(closingTime);
-    if (weeklyOffDay !== undefined) data.weeklyOffDay = String(weeklyOffDay);
-
-    // LOGO / RESTAURANT IMAGE
-    // Schema field: Restaurant.imageUrl
-    if (
-      imageUrl !== undefined ||
-      image_url !== undefined ||
-      logoUrl !== undefined ||
-      logo_url !== undefined
-    ) {
-      data.imageUrl = imageUrl ?? image_url ?? logoUrl ?? logo_url;
+    if (body.isOpen !== undefined || body.is_open !== undefined) {
+      data.isOpen = normalizeBool(body.isOpen ?? body.is_open);
     }
-
-    // BANNER / COVER IMAGE
-    // Schema field required in prisma: Restaurant.bannerUrl String? @db.VarChar(550)
-    if (
-      bannerUrl !== undefined ||
-      banner_url !== undefined ||
-      coverUrl !== undefined ||
-      cover_url !== undefined
-    ) {
-      data.bannerUrl = bannerUrl ?? banner_url ?? coverUrl ?? cover_url;
+    if (body.isAcceptingOrders !== undefined || body.is_accepting_orders !== undefined) {
+      data.isAcceptingOrders = normalizeBool(body.isAcceptingOrders ?? body.is_accepting_orders);
+    }
+    if (body.defaultPrepTime !== undefined || body.default_prep_time !== undefined) {
+      data.defaultPrepTime = Number(body.defaultPrepTime ?? body.default_prep_time) || 30;
+    }
+    if (body.openingTime !== undefined || body.opening_time !== undefined) {
+      data.openingTime = String(body.openingTime ?? body.opening_time);
+    }
+    if (body.closingTime !== undefined || body.closing_time !== undefined) {
+      data.closingTime = String(body.closingTime ?? body.closing_time);
+    }
+    if (body.weeklyOffDay !== undefined || body.weekly_off_day !== undefined) {
+      data.weeklyOffDay = String(body.weeklyOffDay ?? body.weekly_off_day);
     }
 
-    // If this endpoint is ever used with multipart upload middleware
-    if (req.file?.path) {
-      data.imageUrl = req.file.path;
-    }
+    const image = pickFirstDefined(body.imageUrl, body.image_url, body.logoUrl, body.logo_url, req.file?.path);
+    if (image !== undefined) data.imageUrl = image;
+
+    const banner = pickFirstDefined(body.bannerUrl, body.banner_url, body.coverUrl, body.cover_url);
+    if (banner !== undefined) data.bannerUrl = banner;
 
     const updated = await prisma.restaurant.update({
       where: { id: restaurant.id },
       data,
-      include: { timings: true },
+      include: {
+        vendor: {
+          select: {
+            id: true,
+            fullName: true,
+            email: true,
+            phone: true,
+            avatarUrl: true,
+          },
+        },
+        city: true,
+        category: true,
+        timings: true,
+        vendorCategories: true,
+      },
     });
+
+    const openingTime = data.openingTime;
+    const closingTime = data.closingTime;
+    const weeklyOffDay = data.weeklyOffDay;
 
     if (openingTime && closingTime) {
       const weeklyOff = dayNameToNumber(weeklyOffDay);
@@ -1521,7 +1596,21 @@ export const updateVendorSettings = async (req, res) => {
 
     const finalRestaurant = await prisma.restaurant.findUnique({
       where: { id: restaurant.id },
-      include: { timings: true },
+      include: {
+        vendor: {
+          select: {
+            id: true,
+            fullName: true,
+            email: true,
+            phone: true,
+            avatarUrl: true,
+          },
+        },
+        city: true,
+        category: true,
+        timings: true,
+        vendorCategories: true,
+      },
     });
 
     emitVendorRefreshSafe(req.user.id, {
@@ -1534,6 +1623,7 @@ export const updateVendorSettings = async (req, res) => {
       message: "Vendor settings updated",
       data: finalRestaurant || updated,
       restaurant: finalRestaurant || updated,
+      profile: finalRestaurant || updated,
     });
   } catch (error) {
     console.error("Update Vendor Settings Error:", error);
