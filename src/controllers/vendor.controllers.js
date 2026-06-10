@@ -866,8 +866,16 @@ export const getVendorMenu = async (req, res) => {
 
 export const createVendorMenuItem = async (req, res) => {
   try {
-    const restaurant = await getPrimaryRestaurant(req.user.id);
+  const requestedRestaurantId = req.body.restaurantId || req.body.restaurant_id;
 
+const restaurant = requestedRestaurantId
+  ? await prisma.restaurant.findFirst({
+      where: {
+        id: requestedRestaurantId,
+        vendorId: req.user.id,
+      },
+    })
+  : await getPrimaryRestaurant(req.user.id);
     if (!restaurant) {
       return res.status(404).json({
         success: false,
@@ -1421,6 +1429,16 @@ export const updateVendorSettings = async (req, res) => {
       openingTime,
       closingTime,
       weeklyOffDay,
+
+      // Restaurant media
+      imageUrl,
+      image_url,
+      logoUrl,
+      logo_url,
+      bannerUrl,
+      banner_url,
+      coverUrl,
+      cover_url,
     } = req.body;
 
     const data = {};
@@ -1440,6 +1458,33 @@ export const updateVendorSettings = async (req, res) => {
     if (openingTime !== undefined) data.openingTime = String(openingTime);
     if (closingTime !== undefined) data.closingTime = String(closingTime);
     if (weeklyOffDay !== undefined) data.weeklyOffDay = String(weeklyOffDay);
+
+    // LOGO / RESTAURANT IMAGE
+    // Schema field: Restaurant.imageUrl
+    if (
+      imageUrl !== undefined ||
+      image_url !== undefined ||
+      logoUrl !== undefined ||
+      logo_url !== undefined
+    ) {
+      data.imageUrl = imageUrl ?? image_url ?? logoUrl ?? logo_url;
+    }
+
+    // BANNER / COVER IMAGE
+    // Schema field required in prisma: Restaurant.bannerUrl String? @db.VarChar(550)
+    if (
+      bannerUrl !== undefined ||
+      banner_url !== undefined ||
+      coverUrl !== undefined ||
+      cover_url !== undefined
+    ) {
+      data.bannerUrl = bannerUrl ?? banner_url ?? coverUrl ?? cover_url;
+    }
+
+    // If this endpoint is ever used with multipart upload middleware
+    if (req.file?.path) {
+      data.imageUrl = req.file.path;
+    }
 
     const updated = await prisma.restaurant.update({
       where: { id: restaurant.id },
