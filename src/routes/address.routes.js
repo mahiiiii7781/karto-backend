@@ -60,7 +60,7 @@ const validateAddressPayload = ({ label, address, latitude, longitude }) => {
   }
 
   if (String(address).trim().length < 8) {
-    return "Please enter a complete address";
+    return "Please enter a complete address (min 8 characters)";
   }
 
   return validateLatLng({ latitude, longitude });

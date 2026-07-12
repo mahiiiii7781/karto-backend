@@ -161,9 +161,9 @@ model User {
   pushTokens    PushToken[]
   notifications Notification[]
 
-  supportTickets          SupportTicket[]  @relation("CustomerSupportTickets")
-  assignedSupportTickets  SupportTicket[]  @relation("AssignedSupportTickets")
-  supportMessages         SupportMessage[]
+  supportTickets         SupportTicket[]  @relation("CustomerSupportTickets")
+  assignedSupportTickets SupportTicket[]  @relation("AssignedSupportTickets")
+  supportMessages        SupportMessage[]
 
   referralsMade     Referral[] @relation("ReferralsMade")
   referralsReceived Referral[] @relation("ReferralsReceived")
@@ -172,16 +172,17 @@ model User {
 
   vendorSettlements VendorSettlement[] @relation("VendorSettlementUser")
   riderSettlements  RiderSettlement[]  @relation("RiderSettlementUser")
-isOnline Boolean @default(false)
-lastSeen  DateTime?
+  isOnline Boolean @default(false)
+  lastSeen  DateTime?
 
-aadhaarNumber   String?
-drivingLicense  String?
-aadhaarImageUrl String?
-licenseImageUrl String?
-kycStatus       String  @default("PENDING")
+  aadhaarNumber   String?
+  drivingLicense  String?
+  aadhaarImageUrl String?
+  licenseImageUrl String?
+  kycStatus       String  @default("PENDING")
 
-riderIncentives RiderIncentive[]
+  riderIncentives RiderIncentive[]
+  
   @@index([role])
   @@index([email])
   @@index([phone])
@@ -242,8 +243,8 @@ model Category {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  restaurants   Restaurant[]
-  menuItems     MenuItem[]
+  restaurants    Restaurant[]
+  menuItems      MenuItem[]
   subCategories ProductSubCategory[]
 
   @@index([name])
@@ -268,8 +269,6 @@ model ProductSubCategory {
 
 // =========================================================
 // VENDOR INTERNAL CATEGORY / SUBCATEGORY
-// Used inside a specific vendor/store.
-// Example: Vendor -> Category(Mithai) -> SubCategory(Kaju Items) -> MenuItem
 // =========================================================
 
 model VendorCategory {
@@ -332,11 +331,11 @@ model Restaurant {
 
   address  String  @db.VarChar(255)
   latitude  Decimal? @db.Decimal(10, 7)
-longitude Decimal? @db.Decimal(10, 7)
+  longitude Decimal? @db.Decimal(10, 7)
   phone    String  @db.VarChar(255)
   email    String  @unique @db.VarChar(255)
   imageUrl String? @db.VarChar(550)
-
+  bannerUrl String? @db.VarChar(550)
   type       String? @db.VarChar(80)
   commission Decimal @default(0) @db.Decimal(5, 2)
 
@@ -358,11 +357,12 @@ longitude Decimal? @db.Decimal(10, 7)
   bankAccount  String?
   ifscCode     String?
   defaultPrepTime   Int      @default(30)
-isAcceptingOrders Boolean  @default(true)
-busyUntil         DateTime?
-weeklyOffDay      String?
-openingTime       String?
-closingTime       String?
+  isAcceptingOrders Boolean  @default(true)
+  busyUntil         DateTime?
+  weeklyOffDay      String?
+  openingTime       String?
+  closingTime       String?
+  
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -441,7 +441,6 @@ model MenuItem {
   categoryId    String?
   subCategoryId String?
 
-  // Vendor internal category hierarchy
   vendorCategoryId    String?
   vendorSubCategoryId String?
 
@@ -557,6 +556,11 @@ model UserAddress {
   address   String
   country   String   @default("India") @db.VarChar(100)
   city      String?  @db.VarChar(100)
+  
+  // ---> NEW ADDED FIELDS TO FIX THE ADDRESS SAVE BUG <---
+  state     String?  @db.VarChar(100) 
+  pincode   String?  @db.VarChar(20)  
+  
   latitude  Decimal? @db.Decimal(10, 7)
   longitude Decimal? @db.Decimal(10, 7)
   isDefault Boolean  @default(false)
@@ -633,9 +637,9 @@ model Order {
   cancelledBy  String?
   refundAmount Decimal? @db.Decimal(10, 2)
 
-  deliveryOtp          String?
-deliveryOtpVerified  Boolean  @default(false)
-deliveryOtpExpiresAt DateTime?
+  deliveryOtp         String?
+  deliveryOtpVerified  Boolean  @default(false)
+  deliveryOtpExpiresAt DateTime?
   couponId String?
 
   estimatedPreparationMinutes Int?
@@ -666,11 +670,13 @@ deliveryOtpExpiresAt DateTime?
 
   vendorSettlements VendorSettlement[]
   riderSettlements  RiderSettlement[]
-platformFee Decimal @default(0) @db.Decimal(10, 2)
-cgstAmount  Decimal @default(0) @db.Decimal(10, 2)
-sgstAmount  Decimal @default(0) @db.Decimal(10, 2)
-cgstRate    Decimal @default(2.5) @db.Decimal(5, 2)
-sgstRate    Decimal @default(2.5) @db.Decimal(5, 2)
+  
+  platformFee Decimal @default(0) @db.Decimal(10, 2)
+  cgstAmount  Decimal @default(0) @db.Decimal(10, 2)
+  sgstAmount  Decimal @default(0) @db.Decimal(10, 2)
+  cgstRate    Decimal @default(2.5) @db.Decimal(5, 2)
+  sgstRate    Decimal @default(2.5) @db.Decimal(5, 2)
+  
   @@index([userId])
   @@index([restaurantId])
   @@index([vendorId])
@@ -1007,8 +1013,8 @@ model UserWallet {
 }
 
 model WalletTransaction {
-  id     String @id @default(uuid())
-  userId String
+  id       String @id @default(uuid())
+  userId   String
   walletId String?
 
   type   WalletTransactionType
@@ -1112,7 +1118,7 @@ model SupportMessage {
   ticketId String
   senderId String
 
-  message String
+  message  String
   imageUrl String?
 
   createdAt DateTime @default(now())
