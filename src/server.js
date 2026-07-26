@@ -8,7 +8,8 @@ import { fileURLToPath } from "url";
 import prisma from "./prisma.js";
 
 import { initSocket } from "./socket.js";
-
+import swaggerUi from "swagger-ui-express";
+import swaggerJsdoc from "swagger-jsdoc";
 import authRoutes from "./routes/auth.routes.js";
 import vendorRoutes from "./routes/vendor.routes.js";
 import cartRoutes from "./routes/cart.routes.js";
@@ -28,6 +29,27 @@ import uploadRoutes from "./routes/upload.routes.js";
 dotenv.config();
 
 const app = express();
+const swaggerOptions = {
+  definition: {
+    openapi: "3.0.0",
+    info: {
+      title: "Karto API",
+      version: "1.0.0",
+      description: "Karto Backend API Documentation",
+    },
+    servers: [
+      {
+        url:
+          process.env.NODE_ENV === "production"
+            ? "https://karto-backend-kor1.onrender.com"
+            : `http://localhost:${process.env.PORT || 5000}`,
+      },
+    ],
+  },
+  apis: ["./routes/*.js"],
+};
+
+const swaggerSpec = swaggerJsdoc(swaggerOptions);
 const server = http.createServer(app);
 
 const __filename = fileURLToPath(import.meta.url);
@@ -63,7 +85,7 @@ app.use(
 
 app.use(express.json({ limit: "20mb" }));
 app.use(express.urlencoded({ extended: true, limit: "20mb" }));
-
+app.use("/swagger", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 /* SOCKET */
 initSocket(server);
 
