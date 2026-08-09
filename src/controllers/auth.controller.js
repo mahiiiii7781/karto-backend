@@ -7,9 +7,9 @@ import {
   generateRefreshToken,
 } from "../utils/token.js";
 import nodemailer from "nodemailer";
-import twilio from "twilio";
 import dns from "dns";
 import { Resend } from "resend";
+import axios from "axios"; // Ensure you run: npm install axios
 
 dns.setDefaultResultOrder("ipv4first");
 
@@ -61,98 +61,16 @@ const mailTransporter = nodemailer.createTransport({
 
 /* =========================================================
    RESEND EMAIL SETUP - ACTIVE
-   Required Railway/Render env:
-   RESEND_API_KEY=re_xxxxx
-   EMAIL_FROM=onboarding@resend.dev or verified domain email
    ========================================================= */
 
 const resend = new Resend(env.RESEND_API_KEY || process.env.RESEND_API_KEY);
-
-const twilioClient =
-  (env.TWILIO_ACCOUNT_SID || process.env.TWILIO_ACCOUNT_SID) &&
-  (env.TWILIO_AUTH_TOKEN || process.env.TWILIO_AUTH_TOKEN)
-    ? twilio(
-        env.TWILIO_ACCOUNT_SID || process.env.TWILIO_ACCOUNT_SID,
-        env.TWILIO_AUTH_TOKEN || process.env.TWILIO_AUTH_TOKEN
-      )
-    : null;
 
 console.log("SMTP_USER:", process.env.SMTP_USER);
 console.log("SMTP_HOST:", process.env.SMTP_HOST);
 console.log("SMTP_PORT:", process.env.SMTP_PORT);
 console.log("RESEND_API_KEY EXISTS:", Boolean(process.env.RESEND_API_KEY));
 console.log("EMAIL_FROM:", process.env.EMAIL_FROM);
-console.log("TWILIO_CONFIGURED:", Boolean(twilioClient));
-
-/* =========================================================
-   OLD GMAIL OTP SENDER - COMMENTED, KEPT FOR FALLBACK ONLY
-   ========================================================= */
-
-/*
-const sendEmailOtp = async (email, code) => {
-  try {
-    console.log("BEFORE SEND MAIL");
-
-    // await mailTransporter.verify();
-
-    // console.log("AFTER SMTP VERIFY");
-
-    const info = await mailTransporter.sendMail({
-      from: `"Karto Security" <${env.SMTP_USER || process.env.SMTP_USER}>`,
-      to: email,
-      subject: "Your Karto Login OTP",
-      html: `
-        <div style="margin:0;padding:0;background:#050807;font-family:Arial,sans-serif;color:#ffffff;">
-          <div style="max-width:560px;margin:0 auto;padding:28px;">
-            <div style="background:#101510;border:1px solid #2C382E;border-radius:24px;padding:28px;">
-              <div style="font-size:34px;font-weight:900;color:#22C55E;margin-bottom:8px;">
-                Karto
-              </div>
-
-              <h2 style="margin:0;color:#ffffff;font-size:24px;">
-                Verify your login
-              </h2>
-
-              <p style="color:#A7B0AA;font-size:15px;line-height:22px;">
-                Use the OTP below to continue securely. This code is valid for
-                <b style="color:#FACC15;">5 minutes</b>.
-              </p>
-
-              <div style="margin:26px 0;padding:20px;border-radius:18px;background:#0B0F0A;border:1px solid #FACC15;text-align:center;">
-                <div style="font-size:38px;letter-spacing:8px;font-weight:900;color:#FACC15;">
-                  ${code}
-                </div>
-              </div>
-
-              <p style="color:#A7B0AA;font-size:13px;line-height:20px;">
-                If you did not request this OTP, you can safely ignore this email.
-                Your Karto account remains protected.
-              </p>
-
-              <div style="margin-top:22px;padding-top:16px;border-top:1px solid #2C382E;color:#22C55E;font-size:13px;">
-                Fast delivery. Secure login. Premium Karto experience.
-              </div>
-            </div>
-          </div>
-        </div>
-      `,
-    });
-
-    console.log("MAIL SENT SUCCESSFULLY");
-    console.log("MESSAGE ID:", info.messageId);
-
-    return true;
-  } catch (error) {
-    console.error("EMAIL SEND ERROR:", error);
-    throw error;
-  }
-};
-*/
-
-/* =========================================================
-   ACTIVE RESEND OTP SENDER
-   Same Karto theme: black + green + yellow
-   ========================================================= */
+console.log("TWO_FACTOR_API_KEY EXISTS:", Boolean(process.env.TWO_FACTOR_API_KEY));
 
 const sendEmailOtp = async (email, code) => {
   try {
@@ -175,27 +93,22 @@ const sendEmailOtp = async (email, code) => {
               <div style="font-size:34px;font-weight:900;color:#22C55E;margin-bottom:8px;">
                 Karto
               </div>
-
               <h2 style="margin:0;color:#ffffff;font-size:24px;">
                 Verify your login
               </h2>
-
               <p style="color:#A7B0AA;font-size:15px;line-height:22px;">
                 Use the OTP below to continue securely. This code is valid for
                 <b style="color:#FACC15;">5 minutes</b>.
               </p>
-
               <div style="margin:26px 0;padding:20px;border-radius:18px;background:#0B0F0A;border:1px solid #FACC15;text-align:center;">
                 <div style="font-size:38px;letter-spacing:8px;font-weight:900;color:#FACC15;">
                   ${code}
                 </div>
               </div>
-
               <p style="color:#A7B0AA;font-size:13px;line-height:20px;">
                 If you did not request this OTP, you can safely ignore this email.
                 Your Karto account remains protected.
               </p>
-
               <div style="margin-top:22px;padding-top:16px;border-top:1px solid #2C382E;color:#22C55E;font-size:13px;">
                 Fast delivery. Secure login. Premium Karto experience.
               </div>
@@ -480,6 +393,7 @@ export const sendOtp = async (req, res) => {
 
     const code = generateOtp();
 
+    // Saving OTP in DB as fallback and for Email verification
     await prisma.otp.create({
       data: {
         email: normalizedEmail || null,
@@ -493,19 +407,31 @@ export const sendOtp = async (req, res) => {
       await sendEmailOtp(normalizedEmail, code);
     }
 
+    // Replace Twilio with 2Factor.in SMS API
     if (normalizedPhone) {
-      if (!twilioClient) {
+      const apiKey = env.TWO_FACTOR_API_KEY || process.env.TWO_FACTOR_API_KEY;
+      if (!apiKey) {
+        console.error("2Factor API Key is missing");
         return res.status(500).json({
           success: false,
-          message: "Twilio is not configured",
+          message: "SMS service is not configured properly",
         });
       }
 
-      await twilioClient.messages.create({
-        body: `Your Karto OTP is ${code}. It is valid for 5 minutes. Do not share it with anyone.`,
-        from: env.TWILIO_PHONE_NUMBER || process.env.TWILIO_PHONE_NUMBER,
-        to: normalizedPhone,
-      });
+      // Format for 2factor: 91XXXXXXXXXX
+      const phoneFor2FA = `91${normalizedPhone.replace(/\D/g, "").slice(-10)}`;
+      
+      const url = `https://2factor.in/API/V1/${apiKey}/SMS/${phoneFor2FA}/${code}`;
+
+      try {
+        const response = await axios.get(url);
+        if (response.data.Status !== "Success") {
+          throw new Error("2Factor response failed");
+        }
+      } catch (smsError) {
+        console.error("2Factor API Send Error:", smsError?.response?.data || smsError.message);
+        throw new Error("Failed to dispatch SMS via 2Factor");
+      }
     }
 
     return res.status(200).json({
@@ -539,6 +465,24 @@ export const verifyOtp = async (req, res) => {
       });
     }
 
+    // 1. Verify Phone OTP via 2Factor VERIFY3 endpoint
+    if (normalizedPhone) {
+      const apiKey = env.TWO_FACTOR_API_KEY || process.env.TWO_FACTOR_API_KEY;
+      const phoneFor2FA = `91${normalizedPhone.replace(/\D/g, "").slice(-10)}`;
+      
+      const verifyUrl = `https://2factor.in/API/V1/${apiKey}/SMS/VERIFY3/${phoneFor2FA}/${finalCode}`;
+
+      try {
+        const response = await axios.get(verifyUrl);
+        if (response.data.Status !== "Success" || response.data.Details !== "OTP Matched") {
+          return res.status(400).json({ success: false, message: "Invalid OTP" });
+        }
+      } catch (verifyError) {
+        return res.status(400).json({ success: false, message: "Invalid or expired OTP" });
+      }
+    }
+
+    // 2. Fallback / Email verification via local Prisma DB
     const otpRecord = await prisma.otp.findFirst({
       where: {
         code: String(finalCode).trim(),
@@ -552,18 +496,21 @@ export const verifyOtp = async (req, res) => {
       orderBy: { createdAt: "desc" },
     });
 
-    if (!otpRecord) {
+    if (!otpRecord && normalizedEmail) {
       return res.status(400).json({
         success: false,
         message: "Invalid or expired OTP",
       });
     }
 
-    await prisma.otp.update({
-      where: { id: otpRecord.id },
-      data: { verified: true },
-    });
+    if (otpRecord) {
+      await prisma.otp.update({
+        where: { id: otpRecord.id },
+        data: { verified: true },
+      });
+    }
 
+    // 3. User Resolution
     let user = await prisma.user.findFirst({
       where: {
         OR: [
