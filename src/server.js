@@ -6,7 +6,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 
 import prisma from "./prisma.js";
-
+import serviceabilityRoutes from "./routes/serviceability.routes.js";
 import { initSocket } from "./socket.js";
 import swaggerUi from "swagger-ui-express";
 import swaggerJsdoc from "swagger-jsdoc";
@@ -357,7 +357,7 @@ app.use("/api/recently-viewed", recentlyViewedRoutes);
 app.use("/api/coupons", couponRoutes);
 app.use("/api/push", pushRoutes);
 app.use("/api/upload", uploadRoutes);
-
+app.use("/api/serviceability", serviceabilityRoutes);
 /* Compatibility alias */
 app.use("/api/uploads", uploadRoutes);
 
