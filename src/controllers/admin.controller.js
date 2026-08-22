@@ -1765,6 +1765,8 @@ export const getAdminMenuItems = async (req, res) => {
         subCategory: true,
         addons: true,
         customizations: true,
+        vendorCategory: true, // <-- ADD THIS (UI me naam dikhane ke liye)
+        vendorSubCategory: true,
         reviews: {
           include: {
             user: {
@@ -1793,6 +1795,8 @@ export const createMenuItem = async (req, res) => {
       restaurantId,
       categoryId,
       subCategoryId,
+      vendorCategoryId, 
+      vendorSubCategoryId,
       name,
       description,
       price,
@@ -1863,6 +1867,8 @@ export const createMenuItem = async (req, res) => {
         restaurantId,
         categoryId: categoryId || null,
         subCategoryId: subCategoryId || null,
+        vendorCategoryId: vendorCategoryId || null, 
+        vendorSubCategoryId: vendorSubCategoryId || null, 
         name: name.trim(),
         description: description?.trim() || null,
         price: Number(price),
@@ -1923,6 +1929,8 @@ export const updateMenuItem = async (req, res) => {
     const {
       categoryId,
       subCategoryId,
+      vendorCategoryId, // <-- ADD THIS
+      vendorSubCategoryId,
       name,
       description,
       price,
@@ -1947,6 +1955,8 @@ export const updateMenuItem = async (req, res) => {
       ...(subCategoryId !== undefined && {
         subCategoryId: subCategoryId || null,
       }),
+      ...(vendorCategoryId !== undefined && { vendorCategoryId: vendorCategoryId || null }), // <-- ADD THIS
+      ...(vendorSubCategoryId !== undefined && { vendorSubCategoryId: vendorSubCategoryId || null }),
       ...(name !== undefined && { name: name.trim() }),
       ...(description !== undefined && {
         description: description?.trim() || null,
