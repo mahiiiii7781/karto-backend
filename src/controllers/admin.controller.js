@@ -566,7 +566,20 @@ export const createVendorByAdmin = async (req, res) => {
       });
     }
 
-    const finalImageUrl = (await fileUrl(req, "vendors")) || imageUrl || null;
+let finalImageUrl = imageUrl || null;
+
+try {
+  const uploadedImageUrl = await fileUrl(req, "products");
+
+  if (uploadedImageUrl) {
+    finalImageUrl = uploadedImageUrl;
+  }
+} catch (uploadError) {
+  console.error("Menu image upload failed:", uploadError);
+
+  // Image fail ho to bhi menu save continue hoga
+  finalImageUrl = imageUrl || null;
+}
     const hashedPassword = await bcrypt.hash(password, 10);
 
     const result = await prisma.$transaction(async (tx) => {
