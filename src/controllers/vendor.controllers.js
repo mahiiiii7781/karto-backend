@@ -254,6 +254,20 @@ export const getVendorById = async (req, res) => {
         city: true,
         category: true,
         timings: true,
+
+        // Restaurant-owned menu categories and nested subcategories.
+        // These ids are used by the customer Restaurant Detail sidebar.
+        vendorCategories: {
+          where: { isActive: true },
+          include: {
+            subCategories: {
+              where: { isActive: true },
+              orderBy: { createdAt: "asc" },
+            },
+          },
+          orderBy: { createdAt: "asc" },
+        },
+
         ratings: {
           where: { isActive: true },
           take: 5,
@@ -268,9 +282,17 @@ export const getVendorById = async (req, res) => {
             },
           },
         },
+
         menuItems: {
           where: { isAvailable: true },
           include: {
+            // Keep both vendor-owned and global relations in the API response.
+            // Customer menu filtering uses the vendor-owned relations.
+            vendorCategory: true,
+            vendorSubCategory: true,
+            category: true,
+            subCategory: true,
+
             addons: { where: { isActive: true } },
             customizations: { where: { isActive: true } },
             reviews: {
@@ -308,6 +330,7 @@ export const getVendorById = async (req, res) => {
       success: true,
       data: vendor,
       vendor,
+      restaurant: vendor,
     });
   } catch (error) {
     console.error("Get Vendor By Id Error:", error);
