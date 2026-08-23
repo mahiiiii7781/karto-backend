@@ -1751,22 +1751,35 @@ export const deleteSubCategory = async (req, res) => {
 
 export const getAdminMenuItems = async (req, res) => {
   try {
-    const { restaurantId, categoryId, subCategoryId } = req.query;
+    const {
+      restaurantId,
+      vendorCategoryId,
+      vendorSubCategoryId,
+    } = req.query;
 
     const menuItems = await prisma.menuItem.findMany({
       where: {
-        ...(restaurantId && restaurantId !== "ALL" ? { restaurantId } : {}),
-        ...(categoryId && categoryId !== "ALL" ? { categoryId } : {}),
-        ...(subCategoryId && subCategoryId !== "ALL" ? { subCategoryId } : {}),
+        ...(restaurantId && restaurantId !== "ALL"
+          ? { restaurantId }
+          : {}),
+
+        ...(vendorCategoryId && vendorCategoryId !== "ALL"
+          ? { vendorCategoryId }
+          : {}),
+
+        ...(vendorSubCategoryId && vendorSubCategoryId !== "ALL"
+          ? { vendorSubCategoryId }
+          : {}),
       },
+
       include: {
         restaurant: true,
         category: true,
         subCategory: true,
+        vendorCategory: true,
+        vendorSubCategory: true,
         addons: true,
         customizations: true,
-        vendorCategory: true, // <-- ADD THIS (UI me naam dikhane ke liye)
-        vendorSubCategory: true,
         reviews: {
           include: {
             user: {
@@ -1779,13 +1792,24 @@ export const getAdminMenuItems = async (req, res) => {
           },
         },
       },
-      orderBy: { createdAt: "desc" },
+
+      orderBy: {
+        createdAt: "desc",
+      },
     });
 
-    return res.json({ success: true, menuItems, data: menuItems });
+    return res.json({
+      success: true,
+      menuItems,
+      data: menuItems,
+    });
   } catch (error) {
     console.error("Get Admin Menu Items Error:", error);
-    return res.status(500).json({ success: false, message: error.message });
+
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
   }
 };
 
