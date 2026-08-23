@@ -1815,12 +1815,10 @@ export const getAdminMenuItems = async (req, res) => {
 
 export const createMenuItem = async (req, res) => {
   try {
+    const body = req.body || {};
+
     const {
       restaurantId,
-      categoryId,
-      subCategoryId,
-      vendorCategoryId, 
-      vendorSubCategoryId,
       name,
       description,
       price,
@@ -1836,17 +1834,39 @@ export const createMenuItem = async (req, res) => {
       spiceLevel,
       addons,
       customizations,
-    } = req.body;
+    } = body;
 
-    if (!restaurantId || !name?.trim() || price === undefined) {
+    /*
+      IMPORTANT:
+      Admin Menu UI historically used categoryId/subCategoryId for the
+      restaurant-owned menu category fields. Prefer explicit vendor keys,
+      but keep the legacy keys as a fallback so older app builds continue
+      to work without writing vendor ids into the global Category tables.
+    */
+    const finalVendorCategoryId =
+      body.vendorCategoryId || body.categoryId || null;
+
+    const finalVendorSubCategoryId =
+      body.vendorSubCategoryId || body.subCategoryId || null;
+
+    if (!restaurantId || !name?.trim() || price === undefined || price === null || price === "") {
       return res.status(400).json({
         success: false,
         message: "Vendor, product name and price are required",
       });
     }
 
+    const numericPrice = Number(price);
+    if (!Number.isFinite(numericPrice) || numericPrice < 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Price must be a valid number",
+      });
+    }
+
     const restaurant = await prisma.restaurant.findUnique({
       where: { id: restaurantId },
+      select: { id: true },
     });
 
     if (!restaurant) {
@@ -1856,56 +1876,117 @@ export const createMenuItem = async (req, res) => {
       });
     }
 
-    if (categoryId) {
-      const category = await prisma.category.findUnique({
-        where: { id: categoryId },
+    let vendorCategory = null;
+
+    if (finalVendorCategoryId) {
+      vendorCategory = await prisma.vendorCategory.findFirst({
+        where: {
+          id: finalVendorCategoryId,
+          restaurantId,
+        },
+        select: {
+          id: true,
+          restaurantId: true,
+        },
       });
 
-      if (!category) {
+      if (!vendorCategory) {
         return res.status(404).json({
           success: false,
-          message: "Category not found",
+          message: "Vendor category not found for selected restaurant",
         });
       }
     }
 
-    if (subCategoryId) {
-      const subCategory = await prisma.productSubCategory.findUnique({
-        where: { id: subCategoryId },
+    if (finalVendorSubCategoryId) {
+      const vendorSubCategory = await prisma.vendorSubCategory.findFirst({
+        where: {
+          id: finalVendorSubCategoryId,
+          ...(finalVendorCategoryId
+            ? { vendorCategoryId: finalVendorCategoryId }
+            : {
+                vendorCategory: {
+                  restaurantId,
+                },
+              }),
+        },
+        select: {
+          id: true,
+          vendorCategoryId: true,
+        },
       });
 
-      if (!subCategory) {
+      if (!vendorSubCategory) {
         return res.status(404).json({
           success: false,
-          message: "Subcategory not found",
+          message: "Vendor subcategory not found for selected category",
+        });
+      }
+
+      // If only subcategory was supplied, derive its parent category.
+      if (!vendorCategory) {
+        vendorCategory = await prisma.vendorCategory.findFirst({
+          where: {
+            id: vendorSubCategory.vendorCategoryId,
+            restaurantId,
+          },
+          select: {
+            id: true,
+            restaurantId: true,
+          },
         });
       }
     }
 
-    const finalImageUrl = (await fileUrl(req, "products")) || imageUrl || null;
+    const finalImageUrl =
+      (await fileUrl(req, "products")) || imageUrl || null;
+
     const finalAddons = parseJsonArray(addons);
     const finalCustomizations = parseJsonArray(customizations);
 
     const menuItem = await prisma.menuItem.create({
       data: {
         restaurantId,
-        categoryId: categoryId || null,
-        subCategoryId: subCategoryId || null,
-        vendorCategoryId: vendorCategoryId || null, 
-        vendorSubCategoryId: vendorSubCategoryId || null, 
+
+        // Global category FKs intentionally remain null for Admin Menu items.
+        categoryId: null,
+        subCategoryId: null,
+
+        vendorCategoryId: vendorCategory?.id || finalVendorCategoryId || null,
+        vendorSubCategoryId: finalVendorSubCategoryId || null,
+
         name: name.trim(),
         description: description?.trim() || null,
-        price: Number(price),
+        price: numericPrice,
         imageUrl: finalImageUrl,
-        isVegetarian: boolValue(isVegetarian || isVeg),
-        isVeg: boolValue(isVeg || isVegetarian),
+
+        isVegetarian: boolValue(
+          isVegetarian !== undefined ? isVegetarian : isVeg
+        ),
+        isVeg: boolValue(
+          isVeg !== undefined ? isVeg : isVegetarian
+        ),
         isPopular: boolValue(isPopular),
         isBestSeller: boolValue(isBestSeller),
-        isAvailable: String(isAvailable) !== "false",
-        calories: calories ? Number(calories) : null,
+        isAvailable: boolValue(isAvailable, true),
+
+        calories:
+          calories !== undefined && calories !== null && calories !== ""
+            ? Number(calories)
+            : null,
+
         servingInfo: servingInfo?.trim() || null,
-        prepTimeMin: prepTimeMin ? Number(prepTimeMin) : 20,
-        spiceLevel: spiceLevel ? Number(spiceLevel) : 0,
+
+        prepTimeMin:
+          prepTimeMin !== undefined && prepTimeMin !== null && prepTimeMin !== ""
+            ? Number(prepTimeMin)
+            : 20,
+
+        spiceLevel:
+          spiceLevel !== undefined && spiceLevel !== null && spiceLevel !== ""
+            ? Number(spiceLevel)
+            : 0,
+
         addons: {
           create: finalAddons
             .filter((a) => a?.title)
@@ -1913,24 +1994,34 @@ export const createMenuItem = async (req, res) => {
               title: String(a.title).trim(),
               price: Number(a.price || 0),
               imageUrl: a.imageUrl || null,
-              isActive: a.isActive === undefined ? true : Boolean(a.isActive),
+              isActive:
+                a.isActive === undefined
+                  ? true
+                  : boolValue(a.isActive, true),
             })),
         },
+
         customizations: {
           create: finalCustomizations
             .filter((c) => c?.title)
             .map((c) => ({
               title: String(c.title).trim(),
               price: Number(c.price || 0),
-              isRequired: Boolean(c.isRequired),
-              isActive: c.isActive === undefined ? true : Boolean(c.isActive),
+              isRequired: boolValue(c.isRequired),
+              isActive:
+                c.isActive === undefined
+                  ? true
+                  : boolValue(c.isActive, true),
             })),
         },
       },
+
       include: {
         restaurant: true,
         category: true,
         subCategory: true,
+        vendorCategory: true,
+        vendorSubCategory: true,
         addons: true,
         customizations: true,
       },
@@ -1944,17 +2035,36 @@ export const createMenuItem = async (req, res) => {
     });
   } catch (error) {
     console.error("Create Menu Item Error:", error);
-    return res.status(500).json({ success: false, message: error.message });
+    return res.status(500).json({
+      success: false,
+      message: error?.message || "Unable to create menu item",
+    });
   }
 };
 
 export const updateMenuItem = async (req, res) => {
   try {
+    const body = req.body || {};
+    const { id } = req.params;
+
+    const existing = await prisma.menuItem.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        restaurantId: true,
+        vendorCategoryId: true,
+        vendorSubCategoryId: true,
+      },
+    });
+
+    if (!existing) {
+      return res.status(404).json({
+        success: false,
+        message: "Menu item not found",
+      });
+    }
+
     const {
-      categoryId,
-      subCategoryId,
-      vendorCategoryId, // <-- ADD THIS
-      vendorSubCategoryId,
       name,
       description,
       price,
@@ -1970,47 +2080,146 @@ export const updateMenuItem = async (req, res) => {
       spiceLevel,
       addons,
       customizations,
-    } = req.body;
+    } = body;
+
+    const hasVendorCategoryField =
+      body.vendorCategoryId !== undefined || body.categoryId !== undefined;
+
+    const hasVendorSubCategoryField =
+      body.vendorSubCategoryId !== undefined || body.subCategoryId !== undefined;
+
+    const finalVendorCategoryId = hasVendorCategoryField
+      ? (body.vendorCategoryId || body.categoryId || null)
+      : existing.vendorCategoryId;
+
+    const finalVendorSubCategoryId = hasVendorSubCategoryField
+      ? (body.vendorSubCategoryId || body.subCategoryId || null)
+      : existing.vendorSubCategoryId;
+
+    if (finalVendorCategoryId) {
+      const vendorCategory = await prisma.vendorCategory.findFirst({
+        where: {
+          id: finalVendorCategoryId,
+          restaurantId: existing.restaurantId,
+        },
+        select: { id: true },
+      });
+
+      if (!vendorCategory) {
+        return res.status(404).json({
+          success: false,
+          message: "Vendor category not found for this restaurant",
+        });
+      }
+    }
+
+    if (finalVendorSubCategoryId) {
+      const vendorSubCategory = await prisma.vendorSubCategory.findFirst({
+        where: {
+          id: finalVendorSubCategoryId,
+          ...(finalVendorCategoryId
+            ? { vendorCategoryId: finalVendorCategoryId }
+            : {
+                vendorCategory: {
+                  restaurantId: existing.restaurantId,
+                },
+              }),
+        },
+        select: { id: true },
+      });
+
+      if (!vendorSubCategory) {
+        return res.status(404).json({
+          success: false,
+          message: "Vendor subcategory not found for selected category",
+        });
+      }
+    }
+
+    if (price !== undefined) {
+      const numericPrice = Number(price);
+      if (!Number.isFinite(numericPrice) || numericPrice < 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Price must be a valid number",
+        });
+      }
+    }
 
     const finalImageUrl = await fileUrl(req, "products");
 
     const updateData = {
-      ...(categoryId !== undefined && { categoryId: categoryId || null }),
-      ...(subCategoryId !== undefined && {
-        subCategoryId: subCategoryId || null,
+      // Clear legacy/global category links if an older record had them.
+      ...(hasVendorCategoryField && { categoryId: null }),
+      ...(hasVendorSubCategoryField && { subCategoryId: null }),
+
+      ...(hasVendorCategoryField && {
+        vendorCategoryId: finalVendorCategoryId,
       }),
-      ...(vendorCategoryId !== undefined && { vendorCategoryId: vendorCategoryId || null }), // <-- ADD THIS
-      ...(vendorSubCategoryId !== undefined && { vendorSubCategoryId: vendorSubCategoryId || null }),
-      ...(name !== undefined && { name: name.trim() }),
+
+      ...(hasVendorSubCategoryField && {
+        vendorSubCategoryId: finalVendorSubCategoryId,
+      }),
+
+      ...(name !== undefined && { name: String(name).trim() }),
+
       ...(description !== undefined && {
-        description: description?.trim() || null,
+        description: description ? String(description).trim() : null,
       }),
+
       ...(price !== undefined && { price: Number(price) }),
+
       ...(isVegetarian !== undefined && {
         isVegetarian: boolValue(isVegetarian),
       }),
-      ...(isVeg !== undefined && { isVeg: boolValue(isVeg) }),
-      ...(isPopular !== undefined && { isPopular: boolValue(isPopular) }),
+
+      ...(isVeg !== undefined && {
+        isVeg: boolValue(isVeg),
+      }),
+
+      ...(isPopular !== undefined && {
+        isPopular: boolValue(isPopular),
+      }),
+
       ...(isBestSeller !== undefined && {
         isBestSeller: boolValue(isBestSeller),
       }),
+
       ...(isAvailable !== undefined && {
-        isAvailable: String(isAvailable) !== "false",
+        isAvailable: boolValue(isAvailable, true),
       }),
+
       ...(calories !== undefined && {
-        calories: calories ? Number(calories) : null,
+        calories:
+          calories !== null && calories !== ""
+            ? Number(calories)
+            : null,
       }),
+
       ...(servingInfo !== undefined && {
-        servingInfo: servingInfo?.trim() || null,
+        servingInfo: servingInfo ? String(servingInfo).trim() : null,
       }),
+
       ...(prepTimeMin !== undefined && {
-        prepTimeMin: prepTimeMin ? Number(prepTimeMin) : 20,
+        prepTimeMin:
+          prepTimeMin !== null && prepTimeMin !== ""
+            ? Number(prepTimeMin)
+            : 20,
       }),
+
       ...(spiceLevel !== undefined && {
-        spiceLevel: spiceLevel ? Number(spiceLevel) : 0,
+        spiceLevel:
+          spiceLevel !== null && spiceLevel !== ""
+            ? Number(spiceLevel)
+            : 0,
       }),
+
       ...(finalImageUrl && { imageUrl: finalImageUrl }),
-      ...(!finalImageUrl && imageUrl !== undefined && { imageUrl: imageUrl || null }),
+
+      ...(!finalImageUrl &&
+        imageUrl !== undefined && {
+          imageUrl: imageUrl || null,
+        }),
     };
 
     const finalAddons = parseJsonArray(addons);
@@ -2018,13 +2227,13 @@ export const updateMenuItem = async (req, res) => {
 
     const menuItem = await prisma.$transaction(async (tx) => {
       await tx.menuItem.update({
-        where: { id: req.params.id },
+        where: { id },
         data: updateData,
       });
 
       if (addons !== undefined) {
         await tx.menuItemAddon.deleteMany({
-          where: { menuItemId: req.params.id },
+          where: { menuItemId: id },
         });
 
         if (finalAddons.length) {
@@ -2032,11 +2241,14 @@ export const updateMenuItem = async (req, res) => {
             data: finalAddons
               .filter((a) => a?.title)
               .map((a) => ({
-                menuItemId: req.params.id,
+                menuItemId: id,
                 title: String(a.title).trim(),
                 price: Number(a.price || 0),
                 imageUrl: a.imageUrl || null,
-                isActive: a.isActive === undefined ? true : Boolean(a.isActive),
+                isActive:
+                  a.isActive === undefined
+                    ? true
+                    : boolValue(a.isActive, true),
               })),
           });
         }
@@ -2044,7 +2256,7 @@ export const updateMenuItem = async (req, res) => {
 
       if (customizations !== undefined) {
         await tx.menuItemCustomization.deleteMany({
-          where: { menuItemId: req.params.id },
+          where: { menuItemId: id },
         });
 
         if (finalCustomizations.length) {
@@ -2052,22 +2264,27 @@ export const updateMenuItem = async (req, res) => {
             data: finalCustomizations
               .filter((c) => c?.title)
               .map((c) => ({
-                menuItemId: req.params.id,
+                menuItemId: id,
                 title: String(c.title).trim(),
                 price: Number(c.price || 0),
-                isRequired: Boolean(c.isRequired),
-                isActive: c.isActive === undefined ? true : Boolean(c.isActive),
+                isRequired: boolValue(c.isRequired),
+                isActive:
+                  c.isActive === undefined
+                    ? true
+                    : boolValue(c.isActive, true),
               })),
           });
         }
       }
 
       return tx.menuItem.findUnique({
-        where: { id: req.params.id },
+        where: { id },
         include: {
           restaurant: true,
           category: true,
           subCategory: true,
+          vendorCategory: true,
+          vendorSubCategory: true,
           addons: true,
           customizations: true,
         },
@@ -2082,7 +2299,10 @@ export const updateMenuItem = async (req, res) => {
     });
   } catch (error) {
     console.error("Update Menu Item Error:", error);
-    return res.status(500).json({ success: false, message: error.message });
+    return res.status(500).json({
+      success: false,
+      message: error?.message || "Unable to update menu item",
+    });
   }
 };
 
