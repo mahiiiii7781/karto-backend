@@ -734,7 +734,6 @@ export const createVendorByAdmin = async (req, res) => {
     const {
       cityId,
       categoryId,
-      subCategoryId,
       name,
       ownerName,
       ownerMobileNo,
@@ -763,8 +762,6 @@ export const createVendorByAdmin = async (req, res) => {
 
     if (
       !cityId ||
-      !categoryId ||
-      !subCategoryId ||
       !normalizedName ||
       !normalizedOwnerName ||
       !normalizedOwnerPhone ||
@@ -776,7 +773,7 @@ export const createVendorByAdmin = async (req, res) => {
       return res.status(400).json({
         success: false,
         message:
-          "cityId, categoryId, subCategoryId, name, ownerName, ownerMobileNo, phone, email, password and address are required",
+          "cityId, name, ownerName, ownerMobileNo, phone, email, password and address are required",
       });
     }
 
@@ -881,31 +878,17 @@ export const createVendorByAdmin = async (req, res) => {
       });
     }
 
-    const category = await prisma.category.findUnique({
-      where: { id: categoryId },
-    });
-
-    if (!category) {
-      return res.status(404).json({
-        success: false,
-        message: "Parent category not found",
-      });
-    }
-
-    const subCategory =
-      await prisma.productSubCategory.findFirst({
-        where: {
-          id: subCategoryId,
-          categoryId,
-        },
+    if (categoryId) {
+      const category = await prisma.category.findUnique({
+        where: { id: categoryId },
       });
 
-    if (!subCategory) {
-      return res.status(404).json({
-        success: false,
-        message:
-          "Parent subcategory not found or does not belong to selected parent category",
-      });
+      if (!category) {
+        return res.status(404).json({
+          success: false,
+          message: "Category not found",
+        });
+      }
     }
 
     const existingUser = await prisma.user.findFirst({
@@ -1013,8 +996,7 @@ export const createVendorByAdmin = async (req, res) => {
           data: {
             vendorId: vendorUser.id,
             cityId,
-            categoryId,
-            subCategoryId,
+            categoryId: categoryId || null,
             name: normalizedName,
             ownerName: normalizedOwnerName,
             ownerMobileNo: normalizedOwnerPhone,
@@ -1035,7 +1017,6 @@ export const createVendorByAdmin = async (req, res) => {
           include: {
             city: true,
             category: true,
-            subCategory: true,
             vendor: {
               select: {
                 id: true,
@@ -1067,8 +1048,7 @@ export const createVendorByAdmin = async (req, res) => {
         vendorId: result.vendor.id,
         vendorUserId: result.user.id,
         cityId,
-        categoryId,
-        subCategoryId,
+        categoryId: categoryId || null,
         name: normalizedName,
         email: normalizedEmail,
         phone: normalizedPhone,
@@ -1114,28 +1094,16 @@ export const createVendorByAdmin = async (req, res) => {
 
 export const getAdminVendors = async (req, res) => {
   try {
-    const {
-      cityId,
-      categoryId,
-      subCategoryId,
-    } = req.query;
+    const { cityId, categoryId } = req.query;
 
     const vendors = await prisma.restaurant.findMany({
       where: {
-        ...(cityId && cityId !== "ALL"
-          ? { cityId }
-          : {}),
-        ...(categoryId && categoryId !== "ALL"
-          ? { categoryId }
-          : {}),
-        ...(subCategoryId && subCategoryId !== "ALL"
-          ? { subCategoryId }
-          : {}),
+        ...(cityId && cityId !== "ALL" ? { cityId } : {}),
+        ...(categoryId && categoryId !== "ALL" ? { categoryId } : {}),
       },
       include: {
         city: true,
         category: true,
-        subCategory: true,
         vendor: {
           select: {
             id: true,
@@ -1174,21 +1142,10 @@ export const getAdminVendors = async (req, res) => {
       };
     });
 
-    return res.json({
-      success: true,
-      vendors: data,
-      data,
-    });
+    return res.json({ success: true, vendors: data, data });
   } catch (error) {
-    console.error(
-      "Get Admin Vendors Error:",
-      error
-    );
-
-    return res.status(500).json({
-      success: false,
-      message: error.message,
-    });
+    console.error("Get Admin Vendors Error:", error);
+    return res.status(500).json({ success: false, message: error.message });
   }
 };
 
@@ -1255,7 +1212,6 @@ export const updateVendorByAdmin = async (req, res) => {
     const {
       cityId,
       categoryId,
-      subCategoryId,
       name,
       ownerName,
       ownerMobileNo,
@@ -1305,36 +1261,7 @@ export const updateVendorByAdmin = async (req, res) => {
       if (!category) {
         return res.status(404).json({
           success: false,
-          message: "Parent category not found",
-        });
-      }
-    }
-
-    if (subCategoryId) {
-      const finalCategoryId =
-        categoryId || restaurant.categoryId;
-
-      if (!finalCategoryId) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "Parent category is required when parent subcategory is selected",
-        });
-      }
-
-      const subCategory =
-        await prisma.productSubCategory.findFirst({
-          where: {
-            id: subCategoryId,
-            categoryId: finalCategoryId,
-          },
-        });
-
-      if (!subCategory) {
-        return res.status(404).json({
-          success: false,
-          message:
-            "Parent subcategory not found or does not belong to selected parent category",
+          message: "Category not found",
         });
       }
     }
@@ -1548,9 +1475,6 @@ export const updateVendorByAdmin = async (req, res) => {
       ...(categoryId !== undefined && {
         categoryId: categoryId || null,
       }),
-      ...(subCategoryId !== undefined && {
-        subCategoryId: subCategoryId || null,
-      }),
       ...(name !== undefined && {
         name: cleanString(name),
       }),
@@ -1607,7 +1531,6 @@ export const updateVendorByAdmin = async (req, res) => {
           include: {
             city: true,
             category: true,
-            subCategory: true,
             vendor: {
               select: {
                 id: true,
@@ -1636,7 +1559,6 @@ export const updateVendorByAdmin = async (req, res) => {
         phone: restaurant.phone,
         cityId: restaurant.cityId,
         categoryId: restaurant.categoryId,
-        subCategoryId: restaurant.subCategoryId,
         isOpen: restaurant.isOpen,
       },
       newData: restaurantUpdateData,
@@ -1723,98 +1645,39 @@ export const deleteVendorByAdmin = async (req, res) => {
 
 export const getVendorCategories = async (req, res) => {
   try {
-    const {
-      restaurantId,
-      categoryId,
-      subCategoryId,
-    } = req.query;
+    const { restaurantId } = req.query;
 
     const data = await prisma.vendorCategory.findMany({
-      where: {
-        ...(restaurantId && restaurantId !== "ALL"
-          ? { restaurantId }
-          : {}),
-        ...(categoryId && categoryId !== "ALL"
-          ? { categoryId }
-          : {}),
-        ...(subCategoryId && subCategoryId !== "ALL"
-          ? { subCategoryId }
-          : {}),
-      },
+      where: restaurantId && restaurantId !== "ALL" ? { restaurantId } : {},
       include: {
-        restaurant: {
-          include: {
-            city: true,
-            category: true,
-            subCategory: true,
-          },
-        },
-        category: true,
-        subCategory: true,
+        restaurant: true,
         subCategories: true,
         menuItems: true,
       },
-      orderBy: {
-        createdAt: "desc",
-      },
+      orderBy: { createdAt: "desc" },
     });
 
-    return res.json({
-      success: true,
-      categories: data,
-      data,
-    });
+    return res.json({ success: true, categories: data, data });
   } catch (error) {
-    console.error(
-      "Get Vendor Categories Error:",
-      error
-    );
-
-    return res.status(500).json({
-      success: false,
-      message: error.message,
-    });
+    console.error("Get Vendor Categories Error:", error);
+    return res.status(500).json({ success: false, message: error.message });
   }
 };
 
 export const createVendorCategory = async (req, res) => {
   try {
-    const {
-      restaurantId,
-      categoryId,
-      subCategoryId,
-      name,
-      description,
-      imageUrl,
-      isActive,
-    } = req.body;
+    const { restaurantId, name, description, imageUrl } = req.body;
 
-    const normalizedName =
-      cleanString(name);
-
-    if (
-      !restaurantId ||
-      !categoryId ||
-      !subCategoryId ||
-      !normalizedName
-    ) {
+    if (!restaurantId || !name?.trim()) {
       return res.status(400).json({
         success: false,
-        message:
-          "restaurantId, categoryId, subCategoryId and name are required",
+        message: "restaurantId and name are required",
       });
     }
 
-    const restaurant =
-      await prisma.restaurant.findUnique({
-        where: {
-          id: restaurantId,
-        },
-        include: {
-          category: true,
-          subCategory: true,
-        },
-      });
+    const restaurant = await prisma.restaurant.findUnique({
+      where: { id: restaurantId },
+    });
 
     if (!restaurant) {
       return res.status(404).json({
@@ -1823,493 +1686,71 @@ export const createVendorCategory = async (req, res) => {
       });
     }
 
-    const parentCategory =
-      await prisma.category.findUnique({
-        where: {
-          id: categoryId,
-        },
-      });
-
-    if (!parentCategory) {
-      return res.status(404).json({
-        success: false,
-        message:
-          "Parent category not found",
-      });
-    }
-
-    const parentSubCategory =
-      await prisma.productSubCategory.findFirst({
-        where: {
-          id: subCategoryId,
-          categoryId,
-        },
-      });
-
-    if (!parentSubCategory) {
-      return res.status(404).json({
-        success: false,
-        message:
-          "Parent subcategory not found or does not belong to selected parent category",
-      });
-    }
-
-    if (
-      restaurant.categoryId &&
-      restaurant.categoryId !== categoryId
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Selected vendor does not belong to selected parent category",
-      });
-    }
-
-    if (
-      restaurant.subCategoryId &&
-      restaurant.subCategoryId !== subCategoryId
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Selected vendor does not belong to selected parent subcategory",
-      });
-    }
-
-    const duplicate =
-      await prisma.vendorCategory.findFirst({
-        where: {
-          restaurantId,
-          categoryId,
-          subCategoryId,
-          name: {
-            equals: normalizedName,
-            mode: "insensitive",
-          },
-        },
-        select: {
-          id: true,
-        },
-      });
-
-    if (duplicate) {
-      return res.status(409).json({
-        success: false,
-        message:
-          "This vendor category already exists for the selected parent category and subcategory",
-      });
-    }
-
     const finalImageUrl =
-      (await fileUrl(
-        req,
-        "vendor-categories"
-      )) ||
-      cleanString(imageUrl) ||
-      null;
+      (await fileUrl(req, "vendor-categories")) || imageUrl || null;
 
-    const data =
-      await prisma.vendorCategory.create({
-        data: {
-          restaurantId,
-          categoryId,
-          subCategoryId,
-          name: normalizedName,
-          description:
-            cleanString(description) ||
-            null,
-          imageUrl:
-            finalImageUrl,
-          isActive:
-            isActive === undefined
-              ? true
-              : boolValue(
-                  isActive,
-                  true
-                ),
-        },
-        include: {
-          restaurant: {
-            include: {
-              city: true,
-              category: true,
-              subCategory: true,
-            },
-          },
-          category: true,
-          subCategory: true,
-          subCategories: true,
-          menuItems: true,
-        },
-      });
-
-    await auditAdminAction(req, {
-      action:
-        "CREATE_VENDOR_CATEGORY",
-      entityType:
-        "VendorCategory",
-      entityId: data.id,
-      newData: {
+    const data = await prisma.vendorCategory.create({
+      data: {
         restaurantId,
-        categoryId,
-        subCategoryId,
-        name: normalizedName,
-        isActive: data.isActive,
+        name: name.trim(),
+        description: description?.trim() || null,
+        imageUrl: finalImageUrl,
+        isActive: true,
+      },
+      include: {
+        restaurant: true,
+        subCategories: true,
+        menuItems: true,
       },
     });
 
     return res.status(201).json({
       success: true,
-      message:
-        "Vendor category created successfully",
+      message: "Vendor category created successfully",
       category: data,
       data,
     });
   } catch (error) {
-    console.error(
-      "Create Vendor Category Error:",
-      error
-    );
-
-    if (error?.code === "P2002") {
-      return res.status(409).json({
-        success: false,
-        message:
-          "Vendor category already exists",
-      });
-    }
-
-    if (error?.code === "P2003") {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Invalid parent category, parent subcategory or vendor relation",
-      });
-    }
-
-    return res.status(500).json({
-      success: false,
-      message:
-        error?.message ||
-        "Vendor category could not be created",
-    });
+    console.error("Create Vendor Category Error:", error);
+    return res.status(500).json({ success: false, message: error.message });
   }
 };
 
 export const updateVendorCategory = async (req, res) => {
   try {
     const { id } = req.params;
+    const { name, description, imageUrl, isActive } = req.body;
 
-    const {
-      restaurantId,
-      categoryId,
-      subCategoryId,
-      name,
-      description,
-      imageUrl,
-      isActive,
-    } = req.body;
+    const finalImageUrl = await fileUrl(req, "vendor-categories");
 
-    const existing =
-      await prisma.vendorCategory.findUnique({
-        where: {
-          id,
-        },
-        include: {
-          restaurant: true,
-          category: true,
-          subCategory: true,
-        },
-      });
-
-    if (!existing) {
-      return res.status(404).json({
-        success: false,
-        message:
-          "Vendor category not found",
-      });
-    }
-
-    const finalRestaurantId =
-      restaurantId !== undefined
-        ? restaurantId
-        : existing.restaurantId;
-
-    const finalCategoryId =
-      categoryId !== undefined
-        ? categoryId
-        : existing.categoryId;
-
-    const finalSubCategoryId =
-      subCategoryId !== undefined
-        ? subCategoryId
-        : existing.subCategoryId;
-
-    if (
-      !finalRestaurantId ||
-      !finalCategoryId ||
-      !finalSubCategoryId
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "restaurantId, categoryId and subCategoryId are required",
-      });
-    }
-
-    const restaurant =
-      await prisma.restaurant.findUnique({
-        where: {
-          id: finalRestaurantId,
-        },
-      });
-
-    if (!restaurant) {
-      return res.status(404).json({
-        success: false,
-        message:
-          "Vendor not found",
-      });
-    }
-
-    const parentCategory =
-      await prisma.category.findUnique({
-        where: {
-          id: finalCategoryId,
-        },
-      });
-
-    if (!parentCategory) {
-      return res.status(404).json({
-        success: false,
-        message:
-          "Parent category not found",
-      });
-    }
-
-    const parentSubCategory =
-      await prisma.productSubCategory.findFirst({
-        where: {
-          id: finalSubCategoryId,
-          categoryId:
-            finalCategoryId,
-        },
-      });
-
-    if (!parentSubCategory) {
-      return res.status(404).json({
-        success: false,
-        message:
-          "Parent subcategory not found or does not belong to selected parent category",
-      });
-    }
-
-    if (
-      restaurant.categoryId &&
-      restaurant.categoryId !==
-        finalCategoryId
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Selected vendor does not belong to selected parent category",
-      });
-    }
-
-    if (
-      restaurant.subCategoryId &&
-      restaurant.subCategoryId !==
-        finalSubCategoryId
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Selected vendor does not belong to selected parent subcategory",
-      });
-    }
-
-    const normalizedName =
-      name !== undefined
-        ? cleanString(name)
-        : undefined;
-
-    if (
-      name !== undefined &&
-      !normalizedName
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Category name cannot be empty",
-      });
-    }
-
-    if (normalizedName) {
-      const duplicate =
-        await prisma.vendorCategory.findFirst({
-          where: {
-            id: {
-              not: id,
-            },
-            restaurantId:
-              finalRestaurantId,
-            categoryId:
-              finalCategoryId,
-            subCategoryId:
-              finalSubCategoryId,
-            name: {
-              equals:
-                normalizedName,
-              mode:
-                "insensitive",
-            },
-          },
-          select: {
-            id: true,
-          },
-        });
-
-      if (duplicate) {
-        return res.status(409).json({
-          success: false,
-          message:
-            "Another vendor category with this name already exists for the selected hierarchy",
-        });
-      }
-    }
-
-    const uploadedImageUrl =
-      await fileUrl(
-        req,
-        "vendor-categories"
-      );
-
-    const finalImageUrl =
-      uploadedImageUrl !== undefined
-        ? uploadedImageUrl
-        : imageUrl !== undefined
-          ? cleanString(imageUrl) ||
-            null
-          : undefined;
-
-    const updateData = {
-      restaurantId:
-        finalRestaurantId,
-      categoryId:
-        finalCategoryId,
-      subCategoryId:
-        finalSubCategoryId,
-
-      ...(normalizedName !==
-        undefined && {
-        name:
-          normalizedName,
-      }),
-
-      ...(description !==
-        undefined && {
-        description:
-          cleanString(
-            description
-          ) || null,
-      }),
-
-      ...(isActive !==
-        undefined && {
-        isActive:
-          boolValue(
-            isActive,
-            existing.isActive
-          ),
-      }),
-
-      ...(finalImageUrl !==
-        undefined && {
-        imageUrl:
-          finalImageUrl,
-      }),
-    };
-
-    const data =
-      await prisma.vendorCategory.update({
-        where: {
-          id,
-        },
-        data:
-          updateData,
-        include: {
-          restaurant: {
-            include: {
-              city: true,
-              category: true,
-              subCategory: true,
-            },
-          },
-          category: true,
-          subCategory: true,
-          subCategories: true,
-          menuItems: true,
-        },
-      });
-
-    await auditAdminAction(req, {
-      action:
-        "UPDATE_VENDOR_CATEGORY",
-      entityType:
-        "VendorCategory",
-      entityId:
-        id,
-      oldData: {
-        restaurantId:
-          existing.restaurantId,
-        categoryId:
-          existing.categoryId,
-        subCategoryId:
-          existing.subCategoryId,
-        name:
-          existing.name,
-        isActive:
-          existing.isActive,
+    const data = await prisma.vendorCategory.update({
+      where: { id },
+      data: {
+        ...(name !== undefined && { name: name.trim() }),
+        ...(description !== undefined && {
+          description: description?.trim() || null,
+        }),
+        ...(isActive !== undefined && { isActive: boolValue(isActive) }),
+        ...(finalImageUrl && { imageUrl: finalImageUrl }),
+        ...(!finalImageUrl &&
+          imageUrl !== undefined && { imageUrl: imageUrl || null }),
       },
-      newData:
-        updateData,
+      include: {
+        restaurant: true,
+        subCategories: true,
+        menuItems: true,
+      },
     });
 
     return res.json({
       success: true,
-      message:
-        "Vendor category updated successfully",
+      message: "Vendor category updated successfully",
       category: data,
       data,
     });
   } catch (error) {
-    console.error(
-      "Update Vendor Category Error:",
-      error
-    );
-
-    if (error?.code === "P2002") {
-      return res.status(409).json({
-        success: false,
-        message:
-          "Vendor category already exists",
-      });
-    }
-
-    if (error?.code === "P2003") {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Invalid parent category, parent subcategory or vendor relation",
-      });
-    }
-
-    return res.status(500).json({
-      success: false,
-      message:
-        error?.message ||
-        "Vendor category could not be updated",
-    });
+    console.error("Update Vendor Category Error:", error);
+    return res.status(500).json({ success: false, message: error.message });
   }
 };
 
