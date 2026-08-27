@@ -27,7 +27,18 @@ const safeUser = (user) => ({
 const normalizeEmail = (email) =>
   email ? String(email).trim().toLowerCase() : null;
 
-const normalizePhone = (phone) => (phone ? String(phone).trim() : null);
+const normalizePhone = (phone) => {
+  if (!phone) return null;
+
+  const digits = String(phone).replace(/\D/g, "");
+
+  if (!digits) return null;
+
+  // DB source-of-truth = 10 digit Indian mobile number.
+  return digits.length >= 10
+    ? digits.slice(-10)
+    : digits;
+};
 
 const generateOtp = () =>
   Math.floor(100000 + Math.random() * 900000).toString();
@@ -494,6 +505,58 @@ export const logout = async (req, res) => {
   }
 };
 
+export const checkUser = async (req, res) => {
+  try {
+    const email =
+      normalizeEmail(req.body?.email);
+
+    const phone =
+      normalizePhone(req.body?.phone);
+
+    if (!email && !phone) {
+      return res.status(400).json({
+        success: false,
+        exists: false,
+        message: "Email or phone is required",
+      });
+    }
+
+    const user =
+      await prisma.user.findFirst({
+        where: email
+          ? { email }
+          : { phone },
+        select: {
+          id: true,
+          fullName: true,
+          email: true,
+          phone: true,
+          avatarUrl: true,
+          role: true,
+          isActive: true,
+          createdAt: true,
+        },
+      });
+
+    return res.status(200).json({
+      success: true,
+      exists: Boolean(user),
+      user: user || null,
+    });
+  } catch (error) {
+    console.error(
+      "Check User Error:",
+      error
+    );
+
+    return res.status(500).json({
+      success: false,
+      exists: false,
+      message: "Unable to check account",
+    });
+  }
+};
+
 export const sendOtp = async (req, res) => {
   try {
     const identity = getOtpIdentity(req.body || {});
@@ -885,6 +948,394 @@ export const verifyOtp = async (req, res) => {
       success: false,
       message: "Something went wrong",
     });
+  }
+};
+
+export const verifySignupOtps = async (req, res) => {
+  try {
+    const fullName =
+      String(
+        req.body?.fullName || ""
+      ).trim();
+
+    const email =
+      normalizeEmail(
+        req.body?.email
+      );
+
+    const phone =
+      normalizePhone(
+        req.body?.phone
+      );
+
+    const phoneOtp =
+      String(
+        req.body?.phoneOtp || ""
+      ).trim();
+
+    const emailOtp =
+      String(
+        req.body?.emailOtp || ""
+      ).trim();
+
+    const password =
+      req.body?.password
+        ? String(req.body.password)
+        : "";
+
+    if (fullName.length < 2) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Full name must be at least 2 characters",
+      });
+    }
+
+    if (
+      !email ||
+      !/^\S+@\S+\.\S+$/.test(email)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Enter a valid email address",
+      });
+    }
+
+    if (
+      !phone ||
+      !/^[6-9]\d{9}$/.test(phone)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Enter valid 10 digit phone number",
+      });
+    }
+
+    if (
+      !/^\d{6}$/.test(phoneOtp)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Enter valid 6 digit mobile OTP",
+      });
+    }
+
+    if (
+      !/^\d{6}$/.test(emailOtp)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Enter valid 6 digit email OTP",
+      });
+    }
+
+    if (
+      password &&
+      password.length < 6
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Password must be at least 6 characters",
+      });
+    }
+
+    const existingUser =
+      await prisma.user.findFirst({
+        where: {
+          OR: [
+            { email },
+            { phone },
+          ],
+        },
+      });
+
+    if (existingUser) {
+      return res.status(409).json({
+        success: false,
+        message:
+          "An account already exists with this email or phone",
+      });
+    }
+
+    const now =
+      new Date();
+
+    /*
+      IMPORTANT:
+      Email and phone OTP are stored as two separate records.
+      Therefore each channel has its own independent OTP.
+    */
+    const [
+      phoneOtpRecord,
+      emailOtpRecord,
+    ] = await Promise.all([
+      prisma.otp.findFirst({
+        where: {
+          phone,
+          verified: false,
+          expiresAt: {
+            gt: now,
+          },
+        },
+        orderBy: {
+          createdAt: "desc",
+        },
+      }),
+
+      prisma.otp.findFirst({
+        where: {
+          email,
+          verified: false,
+          expiresAt: {
+            gt: now,
+          },
+        },
+        orderBy: {
+          createdAt: "desc",
+        },
+      }),
+    ]);
+
+    if (
+      !phoneOtpRecord ||
+      String(
+        phoneOtpRecord.code
+      ).trim() !== phoneOtp
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Invalid or expired mobile OTP",
+      });
+    }
+
+    if (
+      !emailOtpRecord ||
+      String(
+        emailOtpRecord.code
+      ).trim() !== emailOtp
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Invalid or expired email OTP",
+      });
+    }
+
+    /*
+      Phone OTP must also match 2Factor.
+      Email OTP is verified from our local OTP record.
+    */
+    const apiKey =
+      env.TWO_FACTOR_API_KEY ||
+      process.env.TWO_FACTOR_API_KEY;
+
+    if (!apiKey) {
+      return res.status(503).json({
+        success: false,
+        message:
+          "SMS verification service is unavailable",
+      });
+    }
+
+    const phoneFor2FA =
+      `91${phone}`;
+
+    const verifyUrl =
+      `https://2factor.in/API/V1/${apiKey}/SMS/VERIFY3/` +
+      `${phoneFor2FA}/${phoneOtp}`;
+
+    try {
+      const response =
+        await axios.get(
+          verifyUrl,
+          {
+            timeout: 15000,
+          }
+        );
+
+      const matched =
+        response.data?.Status ===
+          "Success" &&
+        response.data?.Details ===
+          "OTP Matched";
+
+      if (!matched) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Invalid mobile OTP",
+        });
+      }
+    } catch (verifyError) {
+      console.error(
+        "Signup 2Factor Verify Error:",
+        verifyError?.response?.data ||
+          verifyError?.message ||
+          verifyError
+      );
+
+      return res.status(400).json({
+        success: false,
+        message:
+          "Invalid or expired mobile OTP",
+      });
+    }
+
+    const hashedPassword =
+      password
+        ? await bcrypt.hash(
+            password,
+            10
+          )
+        : "";
+
+    /*
+      Consume both OTPs and create the account atomically.
+      This prevents half-created signup state.
+    */
+    const user =
+      await prisma.$transaction(
+        async (tx) => {
+          const consumedPhoneOtp =
+            await tx.otp.updateMany({
+              where: {
+                id:
+                  phoneOtpRecord.id,
+                verified: false,
+                expiresAt: {
+                  gt: now,
+                },
+              },
+              data: {
+                verified: true,
+              },
+            });
+
+          const consumedEmailOtp =
+            await tx.otp.updateMany({
+              where: {
+                id:
+                  emailOtpRecord.id,
+                verified: false,
+                expiresAt: {
+                  gt: now,
+                },
+              },
+              data: {
+                verified: true,
+              },
+            });
+
+          if (
+            consumedPhoneOtp.count !==
+              1 ||
+            consumedEmailOtp.count !==
+              1
+          ) {
+            const otpError =
+              new Error(
+                "OTP was already used. Please request new OTPs."
+              );
+
+            otpError.statusCode =
+              409;
+
+            throw otpError;
+          }
+
+          /*
+            Invalidate remaining active OTPs for these destinations.
+          */
+          await tx.otp.updateMany({
+            where: {
+              OR: [
+                {
+                  phone,
+                  verified: false,
+                },
+                {
+                  email,
+                  verified: false,
+                },
+              ],
+            },
+            data: {
+              verified: true,
+            },
+          });
+
+          return tx.user.create({
+            data: {
+              fullName,
+              email,
+              phone,
+              password:
+                hashedPassword,
+              role:
+                "CUSTOMER",
+            },
+          });
+        }
+      );
+
+    const accessToken =
+      generateAccessToken(user);
+
+    const refreshToken =
+      generateRefreshToken(user);
+
+    const updatedUser =
+      await prisma.user.update({
+        where: {
+          id: user.id,
+        },
+        data: {
+          refreshToken,
+        },
+      });
+
+    return res.status(201).json({
+      success: true,
+      message:
+        "Account created successfully",
+      accessToken,
+      refreshToken,
+      user:
+        safeUser(updatedUser),
+    });
+  } catch (error) {
+    console.error(
+      "Verify Signup OTPs Error:",
+      error
+    );
+
+    if (
+      error?.code === "P2002"
+    ) {
+      return res.status(409).json({
+        success: false,
+        message:
+          "An account already exists with this email or phone",
+      });
+    }
+
+    return res
+      .status(
+        error?.statusCode ||
+          500
+      )
+      .json({
+        success: false,
+        message:
+          error?.message ||
+          "Unable to create account",
+      });
   }
 };
 
