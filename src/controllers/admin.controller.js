@@ -741,13 +741,35 @@ export const createVendorByAdmin = async (req, res) => {
       email,
       password,
       address,
+      latitude,
+      longitude,
       type = "RESTAURANT",
       commission = 0,
       role = "VENDOR",
       imageUrl,
+      isOpen = true,
+      isActive = true,
     } = req.body;
 
-    if (!cityId || !name || !ownerName || !ownerMobileNo || !phone || !email || !password || !address) {
+    const normalizedEmail = cleanEmail(email);
+    const normalizedOwnerPhone = cleanString(ownerMobileNo);
+    const normalizedPhone = cleanString(phone);
+    const normalizedName = cleanString(name);
+    const normalizedOwnerName = cleanString(ownerName);
+    const normalizedAddress = cleanString(address);
+    const normalizedType = cleanString(type) || "RESTAURANT";
+    const commissionNumber = Number(commission ?? 0);
+
+    if (
+      !cityId ||
+      !normalizedName ||
+      !normalizedOwnerName ||
+      !normalizedOwnerPhone ||
+      !normalizedPhone ||
+      !normalizedEmail ||
+      !password ||
+      !normalizedAddress
+    ) {
       return res.status(400).json({
         success: false,
         message:
@@ -762,135 +784,311 @@ export const createVendorByAdmin = async (req, res) => {
       });
     }
 
-    const city = await prisma.city.findUnique({ where: { id: cityId } });
+    if (!/^[6-9]\d{9}$/.test(normalizedOwnerPhone)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid owner mobile number",
+      });
+    }
+
+    if (!/^[6-9]\d{9}$/.test(normalizedPhone)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid vendor phone number",
+      });
+    }
+
+    if (!/^\S+@\S+\.\S+$/.test(normalizedEmail)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid vendor email address",
+      });
+    }
+
+    if (String(password).length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: "Password must be at least 6 characters",
+      });
+    }
+
+    if (
+      !Number.isFinite(commissionNumber) ||
+      commissionNumber < 0 ||
+      commissionNumber > 100
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Commission must be between 0 and 100",
+      });
+    }
+
+    const hasLatitude =
+      latitude !== undefined &&
+      latitude !== null &&
+      String(latitude).trim() !== "";
+
+    const hasLongitude =
+      longitude !== undefined &&
+      longitude !== null &&
+      String(longitude).trim() !== "";
+
+    if (hasLatitude !== hasLongitude) {
+      return res.status(400).json({
+        success: false,
+        message: "Latitude and longitude must be provided together",
+      });
+    }
+
+    const latitudeNumber = hasLatitude ? Number(latitude) : null;
+    const longitudeNumber = hasLongitude ? Number(longitude) : null;
+
+    if (
+      hasLatitude &&
+      (!Number.isFinite(latitudeNumber) ||
+        latitudeNumber < -90 ||
+        latitudeNumber > 90)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Latitude must be between -90 and 90",
+      });
+    }
+
+    if (
+      hasLongitude &&
+      (!Number.isFinite(longitudeNumber) ||
+        longitudeNumber < -180 ||
+        longitudeNumber > 180)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Longitude must be between -180 and 180",
+      });
+    }
+
+    const city = await prisma.city.findUnique({
+      where: { id: cityId },
+    });
 
     if (!city) {
-      return res.status(404).json({ success: false, message: "City not found" });
+      return res.status(404).json({
+        success: false,
+        message: "City not found",
+      });
     }
 
     if (categoryId) {
-      const category = await prisma.category.findUnique({ where: { id: categoryId } });
+      const category = await prisma.category.findUnique({
+        where: { id: categoryId },
+      });
 
       if (!category) {
-        return res.status(404).json({ success: false, message: "Category not found" });
+        return res.status(404).json({
+          success: false,
+          message: "Category not found",
+        });
       }
     }
 
     const existingUser = await prisma.user.findFirst({
       where: {
         OR: [
-          { email: email.trim().toLowerCase() },
-          { phone: ownerMobileNo.trim() },
+          { email: normalizedEmail },
+          { phone: normalizedOwnerPhone },
         ],
+      },
+      select: {
+        id: true,
+        email: true,
+        phone: true,
+        role: true,
       },
     });
 
     if (existingUser) {
       return res.status(409).json({
         success: false,
-        message: "Vendor user already exists",
+        message:
+          existingUser.email === normalizedEmail
+            ? "A user with this email already exists"
+            : "A user with this owner mobile number already exists",
       });
     }
 
     const existingRestaurant = await prisma.restaurant.findFirst({
       where: {
         OR: [
-          { email: email.trim().toLowerCase() },
-          { phone: phone.trim() },
+          { email: normalizedEmail },
+          { phone: normalizedPhone },
         ],
+      },
+      select: {
+        id: true,
+        email: true,
+        phone: true,
       },
     });
 
     if (existingRestaurant) {
       return res.status(409).json({
         success: false,
-        message: "Vendor restaurant already exists",
+        message:
+          existingRestaurant.email === normalizedEmail
+            ? "A vendor with this email already exists"
+            : "A vendor with this phone number already exists",
       });
     }
 
-let finalImageUrl = imageUrl || null;
+    let finalImageUrl = cleanString(imageUrl) || null;
 
-try {
-  const uploadedImageUrl = await fileUrl(req, "products");
+    if (req.file) {
+      try {
+        const uploadedImageUrl =
+          await fileUrl(req, "vendors");
 
-  if (uploadedImageUrl) {
-    finalImageUrl = uploadedImageUrl;
-  }
-} catch (uploadError) {
-  console.error("Menu image upload failed:", uploadError);
+        if (uploadedImageUrl) {
+          finalImageUrl = uploadedImageUrl;
+        }
+      } catch (uploadError) {
+        console.error(
+          "Vendor image upload failed:",
+          uploadError
+        );
 
-  // Image fail ho to bhi menu save continue hoga
-  finalImageUrl = imageUrl || null;
-}
-    const hashedPassword = await bcrypt.hash(password, 10);
+        if (!finalImageUrl) {
+          return res.status(500).json({
+            success: false,
+            message: "Vendor image upload failed",
+          });
+        }
+      }
+    }
 
-    const result = await prisma.$transaction(async (tx) => {
-      const vendorUser = await tx.user.create({
-        data: {
-          fullName: ownerName.trim(),
-          email: email.trim().toLowerCase(),
-          phone: ownerMobileNo.trim(),
-          password: hashedPassword,
-          role: "VENDOR",
-          avatarUrl: finalImageUrl,
-          isActive: true,
-        },
-        select: {
-          id: true,
-          fullName: true,
-          email: true,
-          phone: true,
-          role: true,
-          isActive: true,
-          createdAt: true,
-        },
-      });
+    const hashedPassword =
+      await bcrypt.hash(String(password), 10);
 
-      const vendor = await tx.restaurant.create({
-        data: {
-          vendorId: vendorUser.id,
-          cityId,
-          categoryId: categoryId || null,
-          name: name.trim(),
-          ownerName: ownerName.trim(),
-          ownerMobileNo: ownerMobileNo.trim(),
-          phone: phone.trim(),
-          email: email.trim().toLowerCase(),
-          address: address.trim(),
-          imageUrl: finalImageUrl,
-          type,
-          commission: Number(commission || 0),
-          isOpen: true,
-        },
-        include: {
-          city: true,
-          vendor: {
-            select: {
-              id: true,
-              fullName: true,
-              email: true,
-              phone: true,
-              role: true,
-              isActive: true,
-            },
+    const result = await prisma.$transaction(
+      async (tx) => {
+        const vendorUser = await tx.user.create({
+          data: {
+            fullName: normalizedOwnerName,
+            email: normalizedEmail,
+            phone: normalizedOwnerPhone,
+            password: hashedPassword,
+            role: "VENDOR",
+            avatarUrl: finalImageUrl,
+            isActive: boolValue(isActive, true),
           },
-          category: true,
-          orders: true,
-          menuItems: true,
-        },
-      });
+          select: {
+            id: true,
+            fullName: true,
+            email: true,
+            phone: true,
+            avatarUrl: true,
+            role: true,
+            isActive: true,
+            createdAt: true,
+          },
+        });
 
-      return { user: vendorUser, vendor };
+        const vendor = await tx.restaurant.create({
+          data: {
+            vendorId: vendorUser.id,
+            cityId,
+            categoryId: categoryId || null,
+            name: normalizedName,
+            ownerName: normalizedOwnerName,
+            ownerMobileNo: normalizedOwnerPhone,
+            phone: normalizedPhone,
+            email: normalizedEmail,
+            address: normalizedAddress,
+            imageUrl: finalImageUrl,
+            type: normalizedType,
+            commission: commissionNumber,
+            isOpen: boolValue(isOpen, true),
+            ...(hasLatitude
+              ? {
+                  latitude: latitudeNumber,
+                  longitude: longitudeNumber,
+                }
+              : {}),
+          },
+          include: {
+            city: true,
+            category: true,
+            vendor: {
+              select: {
+                id: true,
+                fullName: true,
+                email: true,
+                phone: true,
+                avatarUrl: true,
+                role: true,
+                isActive: true,
+              },
+            },
+            orders: true,
+            menuItems: true,
+          },
+        });
+
+        return {
+          user: vendorUser,
+          vendor,
+        };
+      }
+    );
+
+    await auditAdminAction(req, {
+      action: "CREATE_VENDOR",
+      entityType: "Restaurant",
+      entityId: result.vendor.id,
+      newData: {
+        vendorId: result.vendor.id,
+        vendorUserId: result.user.id,
+        cityId,
+        categoryId: categoryId || null,
+        name: normalizedName,
+        email: normalizedEmail,
+        phone: normalizedPhone,
+      },
     });
 
     return res.status(201).json({
       success: true,
       message: "Vendor created successfully",
-      data: result,
+      vendor: result.vendor,
+      user: result.user,
+      data: result.vendor,
     });
   } catch (error) {
     console.error("Create Vendor Error:", error);
-    return res.status(500).json({ success: false, message: error.message });
+
+    if (error?.code === "P2002") {
+      const fields = Array.isArray(error?.meta?.target)
+        ? error.meta.target.join(", ")
+        : "unique field";
+
+      return res.status(409).json({
+        success: false,
+        message: `Vendor already exists for ${fields}`,
+      });
+    }
+
+    if (error?.code === "P2003") {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid vendor relation data",
+      });
+    }
+
+    return res.status(500).json({
+      success: false,
+      message:
+        error?.message ||
+        "Vendor could not be created",
+    });
   }
 };
 
@@ -1010,6 +1208,7 @@ export const toggleRestaurantStatus = async (req, res) => {
 export const updateVendorByAdmin = async (req, res) => {
   try {
     const { id } = req.params;
+
     const {
       cityId,
       categoryId,
@@ -1019,6 +1218,8 @@ export const updateVendorByAdmin = async (req, res) => {
       phone,
       email,
       address,
+      latitude,
+      longitude,
       type,
       commission,
       imageUrl,
@@ -1027,78 +1228,340 @@ export const updateVendorByAdmin = async (req, res) => {
       password,
     } = req.body;
 
-    if (cityId) {
-      const city = await prisma.city.findUnique({ where: { id: cityId } });
-      if (!city) return res.status(404).json({ success: false, message: "City not found" });
-    }
-
-    if (categoryId) {
-      const category = await prisma.category.findUnique({ where: { id: categoryId } });
-      if (!category) return res.status(404).json({ success: false, message: "Category not found" });
-    }
-
     const restaurant = await prisma.restaurant.findUnique({
       where: { id },
       include: { vendor: true },
     });
 
     if (!restaurant) {
-      return res.status(404).json({ success: false, message: "Vendor not found" });
+      return res.status(404).json({
+        success: false,
+        message: "Vendor not found",
+      });
     }
 
-    const finalImageUrl = await fileUrl(req, "vendors");
+    if (cityId) {
+      const city = await prisma.city.findUnique({
+        where: { id: cityId },
+      });
+
+      if (!city) {
+        return res.status(404).json({
+          success: false,
+          message: "City not found",
+        });
+      }
+    }
+
+    if (categoryId) {
+      const category = await prisma.category.findUnique({
+        where: { id: categoryId },
+      });
+
+      if (!category) {
+        return res.status(404).json({
+          success: false,
+          message: "Category not found",
+        });
+      }
+    }
+
+    const cleanOwnerPhone =
+      ownerMobileNo !== undefined
+        ? cleanString(ownerMobileNo)
+        : undefined;
+
+    const cleanVendorPhone =
+      phone !== undefined
+        ? cleanString(phone)
+        : undefined;
+
+    const normalizedEmail =
+      email !== undefined
+        ? cleanEmail(email)
+        : undefined;
+
+    if (
+      cleanOwnerPhone !== undefined &&
+      !/^[6-9]\d{9}$/.test(cleanOwnerPhone)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid owner mobile number",
+      });
+    }
+
+    if (
+      cleanVendorPhone !== undefined &&
+      !/^[6-9]\d{9}$/.test(cleanVendorPhone)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid vendor phone number",
+      });
+    }
+
+    if (
+      normalizedEmail !== undefined &&
+      !/^\S+@\S+\.\S+$/.test(normalizedEmail)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid vendor email address",
+      });
+    }
+
+    if (password && String(password).length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: "Password must be at least 6 characters",
+      });
+    }
+
+    if (commission !== undefined) {
+      const commissionNumber = Number(commission);
+
+      if (
+        !Number.isFinite(commissionNumber) ||
+        commissionNumber < 0 ||
+        commissionNumber > 100
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Commission must be between 0 and 100",
+        });
+      }
+    }
+
+    const hasLatitude =
+      latitude !== undefined &&
+      latitude !== null &&
+      String(latitude).trim() !== "";
+
+    const hasLongitude =
+      longitude !== undefined &&
+      longitude !== null &&
+      String(longitude).trim() !== "";
+
+    if (hasLatitude !== hasLongitude) {
+      return res.status(400).json({
+        success: false,
+        message: "Latitude and longitude must be provided together",
+      });
+    }
+
+    const latitudeNumber = hasLatitude ? Number(latitude) : undefined;
+    const longitudeNumber = hasLongitude ? Number(longitude) : undefined;
+
+    if (
+      hasLatitude &&
+      (!Number.isFinite(latitudeNumber) ||
+        latitudeNumber < -90 ||
+        latitudeNumber > 90)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Latitude must be between -90 and 90",
+      });
+    }
+
+    if (
+      hasLongitude &&
+      (!Number.isFinite(longitudeNumber) ||
+        longitudeNumber < -180 ||
+        longitudeNumber > 180)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Longitude must be between -180 and 180",
+      });
+    }
+
+    if (
+      normalizedEmail !== undefined ||
+      cleanOwnerPhone !== undefined
+    ) {
+      const duplicateUser = await prisma.user.findFirst({
+        where: {
+          id: restaurant.vendorId
+            ? { not: restaurant.vendorId }
+            : undefined,
+          OR: [
+            normalizedEmail
+              ? { email: normalizedEmail }
+              : undefined,
+            cleanOwnerPhone
+              ? { phone: cleanOwnerPhone }
+              : undefined,
+          ].filter(Boolean),
+        },
+        select: { id: true },
+      });
+
+      if (duplicateUser) {
+        return res.status(409).json({
+          success: false,
+          message:
+            "Another user already uses this email or owner mobile number",
+        });
+      }
+    }
+
+    if (
+      normalizedEmail !== undefined ||
+      cleanVendorPhone !== undefined
+    ) {
+      const duplicateRestaurant =
+        await prisma.restaurant.findFirst({
+          where: {
+            id: { not: id },
+            OR: [
+              normalizedEmail
+                ? { email: normalizedEmail }
+                : undefined,
+              cleanVendorPhone
+                ? { phone: cleanVendorPhone }
+                : undefined,
+            ].filter(Boolean),
+          },
+          select: { id: true },
+        });
+
+      if (duplicateRestaurant) {
+        return res.status(409).json({
+          success: false,
+          message:
+            "Another vendor already uses this email or phone number",
+        });
+      }
+    }
+
+    let finalImageUrl = undefined;
+
+    if (req.file) {
+      finalImageUrl =
+        await fileUrl(req, "vendors");
+    } else if (imageUrl !== undefined) {
+      finalImageUrl =
+        cleanString(imageUrl) || null;
+    }
+
     const userUpdateData = {
-      ...(ownerName !== undefined && { fullName: cleanString(ownerName) }),
-      ...(email !== undefined && { email: cleanEmail(email) }),
-      ...(ownerMobileNo !== undefined && { phone: cleanString(ownerMobileNo) }),
-      ...(finalImageUrl && { avatarUrl: finalImageUrl }),
-      ...(!finalImageUrl && imageUrl !== undefined && { avatarUrl: imageUrl || null }),
-      ...(password ? { password: await bcrypt.hash(password, 10) } : {}),
-      ...(isActive !== undefined && { isActive: boolValue(isActive) }),
+      ...(ownerName !== undefined && {
+        fullName: cleanString(ownerName),
+      }),
+      ...(normalizedEmail !== undefined && {
+        email: normalizedEmail,
+      }),
+      ...(cleanOwnerPhone !== undefined && {
+        phone: cleanOwnerPhone,
+      }),
+      ...(finalImageUrl !== undefined && {
+        avatarUrl: finalImageUrl,
+      }),
+      ...(password && {
+        password: await bcrypt.hash(
+          String(password),
+          10
+        ),
+      }),
+      ...(isActive !== undefined && {
+        isActive: boolValue(isActive),
+      }),
     };
 
     const restaurantUpdateData = {
       ...(cityId !== undefined && { cityId }),
-      ...(categoryId !== undefined && { categoryId: categoryId || null }),
-      ...(name !== undefined && { name: cleanString(name) }),
-      ...(ownerName !== undefined && { ownerName: cleanString(ownerName) }),
-      ...(ownerMobileNo !== undefined && { ownerMobileNo: cleanString(ownerMobileNo) }),
-      ...(phone !== undefined && { phone: cleanString(phone) }),
-      ...(email !== undefined && { email: cleanEmail(email) }),
-      ...(address !== undefined && { address: cleanString(address) }),
-      ...(type !== undefined && { type }),
-      ...(commission !== undefined && { commission: Number(commission || 0) }),
-      ...(isOpen !== undefined && { isOpen: boolValue(isOpen) }),
-      ...(isActive !== undefined && { isOpen: boolValue(isActive) }),
-      ...(finalImageUrl && { imageUrl: finalImageUrl }),
-      ...(!finalImageUrl && imageUrl !== undefined && { imageUrl: imageUrl || null }),
+      ...(categoryId !== undefined && {
+        categoryId: categoryId || null,
+      }),
+      ...(name !== undefined && {
+        name: cleanString(name),
+      }),
+      ...(ownerName !== undefined && {
+        ownerName: cleanString(ownerName),
+      }),
+      ...(cleanOwnerPhone !== undefined && {
+        ownerMobileNo: cleanOwnerPhone,
+      }),
+      ...(cleanVendorPhone !== undefined && {
+        phone: cleanVendorPhone,
+      }),
+      ...(normalizedEmail !== undefined && {
+        email: normalizedEmail,
+      }),
+      ...(address !== undefined && {
+        address: cleanString(address),
+      }),
+      ...(type !== undefined && {
+        type: cleanString(type),
+      }),
+      ...(commission !== undefined && {
+        commission: Number(commission),
+      }),
+      ...(isOpen !== undefined && {
+        isOpen: boolValue(isOpen),
+      }),
+      ...(finalImageUrl !== undefined && {
+        imageUrl: finalImageUrl,
+      }),
+      ...(hasLatitude && {
+        latitude: latitudeNumber,
+        longitude: longitudeNumber,
+      }),
     };
 
-    const data = await prisma.$transaction(async (tx) => {
-      if (Object.keys(userUpdateData).length && restaurant.vendorId) {
-        await tx.user.update({ where: { id: restaurant.vendorId }, data: userUpdateData });
-      }
-
-      return tx.restaurant.update({
-        where: { id },
-        data: restaurantUpdateData,
-        include: {
-          city: true,
-          category: true,
-          vendor: {
-            select: {
-              id: true,
-              fullName: true,
-              email: true,
-              phone: true,
-              role: true,
-              isActive: true,
+    const data = await prisma.$transaction(
+      async (tx) => {
+        if (
+          Object.keys(userUpdateData).length &&
+          restaurant.vendorId
+        ) {
+          await tx.user.update({
+            where: {
+              id: restaurant.vendorId,
             },
+            data: userUpdateData,
+          });
+        }
+
+        return tx.restaurant.update({
+          where: { id },
+          data: restaurantUpdateData,
+          include: {
+            city: true,
+            category: true,
+            vendor: {
+              select: {
+                id: true,
+                fullName: true,
+                email: true,
+                phone: true,
+                avatarUrl: true,
+                role: true,
+                isActive: true,
+              },
+            },
+            orders: true,
+            menuItems: true,
           },
-          orders: true,
-          menuItems: true,
-        },
-      });
+        });
+      }
+    );
+
+    await auditAdminAction(req, {
+      action: "UPDATE_VENDOR",
+      entityType: "Restaurant",
+      entityId: id,
+      oldData: {
+        name: restaurant.name,
+        email: restaurant.email,
+        phone: restaurant.phone,
+        cityId: restaurant.cityId,
+        categoryId: restaurant.categoryId,
+        isOpen: restaurant.isOpen,
+      },
+      newData: restaurantUpdateData,
     });
 
     return res.json({
@@ -1109,7 +1572,28 @@ export const updateVendorByAdmin = async (req, res) => {
     });
   } catch (error) {
     console.error("Update Vendor Error:", error);
-    return res.status(500).json({ success: false, message: error.message });
+
+    if (error?.code === "P2002") {
+      return res.status(409).json({
+        success: false,
+        message:
+          "Email or phone is already used by another account",
+      });
+    }
+
+    if (error?.code === "P2003") {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid vendor relation data",
+      });
+    }
+
+    return res.status(500).json({
+      success: false,
+      message:
+        error?.message ||
+        "Vendor could not be updated",
+    });
   }
 };
 
