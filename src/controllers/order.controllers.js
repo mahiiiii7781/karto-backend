@@ -70,6 +70,178 @@ const SGST_RATE = round2(process.env.KARTO_SGST_RATE || 2.5);
 
 const normalizeCouponCode = (code) => String(code || "").trim().toUpperCase();
 
+
+const MAX_ORDER_ITEM_QUANTITY = Math.max(
+  1,
+  Number(process.env.KARTO_MAX_CART_ITEM_QUANTITY || 50)
+);
+
+const isPrepaidMethod = (method) =>
+  ["ONLINE", "UPI", "CARD", "WALLET"].includes(
+    String(method || "").toUpperCase()
+  );
+
+const getCommissionableAmount = (itemTotal, discount) =>
+  round2(Math.max(toNumber(itemTotal) - toNumber(discount), 0));
+
+const buildCommissionSnapshot = (restaurant, itemTotal, discount) => {
+  const commissionableAmount = getCommissionableAmount(itemTotal, discount);
+  const commissionRate = round2(restaurant?.commission || 0);
+  const platformCommissionAmount = round2(
+    (commissionableAmount * commissionRate) / 100
+  );
+  const vendorSettlementAmount = round2(
+    Math.max(commissionableAmount - platformCommissionAmount, 0)
+  );
+
+  return {
+    commissionableAmount,
+    commissionRate,
+    platformCommissionAmount,
+    vendorSettlementAmount,
+  };
+};
+
+const getOrderFinancials = (order) => {
+  const commissionableAmount =
+    order?.commissionableAmount !== null &&
+    order?.commissionableAmount !== undefined
+      ? round2(order.commissionableAmount)
+      : getCommissionableAmount(order?.itemTotal, order?.discount);
+
+  const commissionRate = round2(
+    order?.commissionRate ??
+      order?.restaurant?.commission ??
+      0
+  );
+
+  const platformCommissionAmount = round2(
+    order?.platformCommissionAmount !== null &&
+      order?.platformCommissionAmount !== undefined
+      ? order.platformCommissionAmount
+      : (commissionableAmount * commissionRate) / 100
+  );
+
+  const vendorSettlementAmount = round2(
+    order?.vendorSettlementAmount !== null &&
+      order?.vendorSettlementAmount !== undefined
+      ? order.vendorSettlementAmount
+      : Math.max(commissionableAmount - platformCommissionAmount, 0)
+  );
+
+  return {
+    commissionableAmount,
+    commissionRate,
+    platformCommissionAmount,
+    vendorSettlementAmount,
+  };
+};
+
+const createRefundIfRequired = async (tx, order, reason) => {
+  if (
+    !isPrepaidMethod(order.paymentMethod) ||
+    order.paymentStatus !== "PAID"
+  ) {
+    return null;
+  }
+
+  const existingRefund = await tx.refund.findFirst({
+    where: {
+      orderId: order.id,
+      status: {
+        in: ["PENDING", "PROCESSING", "COMPLETED"],
+      },
+    },
+  });
+
+  if (existingRefund) return existingRefund;
+
+  const transaction = await tx.paymentTransaction.findFirst({
+    where: {
+      orderId: order.id,
+      status: "SUCCESS",
+    },
+    orderBy: { createdAt: "desc" },
+  });
+
+  return tx.refund.create({
+    data: {
+      orderId: order.id,
+      paymentTransactionId: transaction?.id || null,
+      amount: round2(order.totalAmount),
+      reason: reason || "Order cancelled",
+      status: "PENDING",
+    },
+  });
+};
+
+const ensureDeliveredSettlements = async (tx, order) => {
+  if (
+    order.status !== "DELIVERED" ||
+    order.paymentStatus !== "PAID"
+  ) {
+    return;
+  }
+
+  const finance = getOrderFinancials(order);
+
+  if (order.vendorId) {
+    await tx.vendorSettlement.upsert({
+      where: { orderId: order.id },
+      update: {
+        vendorId: order.vendorId,
+        restaurantId: order.restaurantId,
+        grossAmount: round2(order.totalAmount),
+        commissionRate: finance.commissionRate,
+        commissionAmount: finance.platformCommissionAmount,
+        netAmount: finance.vendorSettlementAmount,
+      },
+      create: {
+        vendorId: order.vendorId,
+        restaurantId: order.restaurantId,
+        orderId: order.id,
+        grossAmount: round2(order.totalAmount),
+        commissionRate: finance.commissionRate,
+        commissionAmount: finance.platformCommissionAmount,
+        netAmount: finance.vendorSettlementAmount,
+        status: "PENDING",
+        periodStart: order.deliveredAt || new Date(),
+        periodEnd: order.deliveredAt || new Date(),
+      },
+    });
+  }
+
+  if (order.riderId) {
+    await tx.riderSettlement.upsert({
+      where: { orderId: order.id },
+      update: {
+        riderId: order.riderId,
+        amount: round2(order.deliveryFee),
+      },
+      create: {
+        riderId: order.riderId,
+        orderId: order.id,
+        amount: round2(order.deliveryFee),
+        status: "PENDING",
+        periodStart: order.deliveredAt || new Date(),
+        periodEnd: order.deliveredAt || new Date(),
+      },
+    });
+  }
+};
+
+const allowedTransitions = {
+  PLACED: ["ACCEPTED_BY_VENDOR", "CANCELLED"],
+  ACCEPTED_BY_VENDOR: ["PREPARING", "READY_FOR_PICKUP", "CANCELLED"],
+  PREPARING: ["READY_FOR_PICKUP", "CANCELLED"],
+  READY_FOR_PICKUP: ["ASSIGNED_TO_RIDER", "CANCELLED"],
+  ASSIGNED_TO_RIDER: ["PICKED_UP", "CANCELLED"],
+  PICKED_UP: ["OUT_FOR_DELIVERY"],
+  OUT_FOR_DELIVERY: ["DELIVERED"],
+  DELIVERED: [],
+  CANCELLED: [],
+};
+
 const calculateCouponDiscount = ({ coupon, itemTotal, deliveryFee }) => {
   let discount = 0;
 
@@ -116,14 +288,19 @@ const calculateFreshCartItemPricing = (item) => {
   };
 };
 
+
 const calculateOrderPricing = ({
   cartItems,
   restaurant,
   address,
   discount = 0,
+  freeDelivery = false,
 }) => {
   const itemTotal = round2(
-    cartItems.reduce((sum, item) => sum + toNumber(item.totalPrice), 0)
+    cartItems.reduce(
+      (sum, item) => sum + toNumber(item.totalPrice),
+      0
+    )
   );
 
   const distanceKm = calculateDistanceKm(
@@ -133,20 +310,57 @@ const calculateOrderPricing = ({
     address?.longitude
   );
 
-  const deliveryFee = round2(calculateDeliveryFee(itemTotal, distanceKm));
+  const deliveryFeeBeforeDiscount = round2(
+    calculateDeliveryFee(itemTotal, distanceKm)
+  );
+
+  const itemDiscount = Math.min(
+    round2(Math.max(0, discount)),
+    itemTotal
+  );
+
+  const deliveryDiscount = freeDelivery
+    ? deliveryFeeBeforeDiscount
+    : 0;
+
+  const deliveryFee = round2(
+    Math.max(deliveryFeeBeforeDiscount - deliveryDiscount, 0)
+  );
+
+  const taxableAmount = round2(
+    Math.max(itemTotal - itemDiscount, 0)
+  );
+
   const platformFee = PLATFORM_FEE;
 
-  const cgstAmount = round2((itemTotal * CGST_RATE) / 100);
-  const sgstAmount = round2((itemTotal * SGST_RATE) / 100);
-  const taxAmount = round2(cgstAmount + sgstAmount);
+  const cgstAmount = round2(
+    (taxableAmount * CGST_RATE) / 100
+  );
+
+  const sgstAmount = round2(
+    (taxableAmount * SGST_RATE) / 100
+  );
+
+  const taxAmount = round2(
+    cgstAmount + sgstAmount
+  );
+
+  const totalDiscount = round2(
+    itemDiscount + deliveryDiscount
+  );
 
   const totalAmount = round2(
-    itemTotal + deliveryFee + platformFee + taxAmount - discount
+    taxableAmount +
+      deliveryFee +
+      platformFee +
+      taxAmount
   );
 
   return {
     itemTotal,
     distanceKm,
+    deliveryFeeBeforeDiscount,
+    deliveryDiscount,
     deliveryFee,
     platformFee,
     cgstRate: CGST_RATE,
@@ -154,14 +368,21 @@ const calculateOrderPricing = ({
     cgstAmount,
     sgstAmount,
     taxAmount,
-    discount: round2(discount),
+    discount: itemDiscount,
+    totalDiscount,
+    taxableAmount,
     totalAmount: Math.max(0, totalAmount),
+
     pricingResponse: {
       cartValue: itemTotal,
       subtotal: itemTotal,
+      itemTotal,
       distanceKm,
+      deliveryFeeBeforeDiscount,
+      deliveryDiscount,
       deliveryFee,
       platformFee,
+      taxableAmount,
       tax: {
         cgstRate: CGST_RATE,
         sgstRate: SGST_RATE,
@@ -170,7 +391,8 @@ const calculateOrderPricing = ({
         total: taxAmount,
       },
       taxAmount,
-      discount: round2(discount),
+      discount: itemDiscount,
+      totalDiscount,
       totalAmount: Math.max(0, totalAmount),
       grandTotal: Math.max(0, totalAmount),
     },
@@ -408,6 +630,8 @@ export const createOrder = async (req, res) => {
       couponCode,
     } = req.body;
 
+    const normalizedPaymentMethod = String(paymentMethod || "COD").toUpperCase();
+
     if (!addressId) {
       return res.status(400).json({
         success: false,
@@ -415,21 +639,39 @@ export const createOrder = async (req, res) => {
       });
     }
 
-    if (!["COD", "ONLINE", "WALLET"].includes(paymentMethod)) {
+    if (
+      !["COD", "ONLINE", "UPI", "CARD", "WALLET"].includes(
+        normalizedPaymentMethod
+      )
+    ) {
       return res.status(400).json({
         success: false,
         message: "Invalid payment method",
       });
     }
 
-    const cartItemsRaw = await prisma.cartItem.findMany({
-      where: { userId: req.user.id },
-      include: {
-        menuItem: true,
-        restaurant: true,
-      },
-      orderBy: { createdAt: "asc" },
-    });
+    const [cartItemsRaw, address] = await Promise.all([
+      prisma.cartItem.findMany({
+        where: { userId: req.user.id },
+        include: {
+          menuItem: {
+            include: {
+              customizations: true,
+              addons: true,
+            },
+          },
+          restaurant: true,
+        },
+        orderBy: { createdAt: "asc" },
+      }),
+
+      prisma.userAddress.findFirst({
+        where: {
+          id: addressId,
+          userId: req.user.id,
+        },
+      }),
+    ]);
 
     if (!cartItemsRaw.length) {
       return res.status(400).json({
@@ -438,38 +680,6 @@ export const createOrder = async (req, res) => {
       });
     }
 
-    const restaurantId = cartItemsRaw[0].restaurantId;
-
-    const hasDifferentRestaurant = cartItemsRaw.some(
-      (item) => item.restaurantId !== restaurantId
-    );
-
-    if (hasDifferentRestaurant) {
-      return res.status(400).json({
-        success: false,
-        message: "Cart contains items from multiple stores",
-      });
-    }
-
-    const restaurant = await prisma.restaurant.findUnique({
-      where: { id: restaurantId },
-      include: { timings: true },
-    });
-
-    if (!restaurant) {
-      return res.status(404).json({
-        success: false,
-        message: "Restaurant not found",
-      });
-    }
-
-    const address = await prisma.userAddress.findFirst({
-      where: {
-        id: addressId,
-        userId: req.user.id,
-      },
-    });
-
     if (!address) {
       return res.status(404).json({
         success: false,
@@ -477,60 +687,178 @@ export const createOrder = async (req, res) => {
       });
     }
 
+    const restaurantId = cartItemsRaw[0].restaurantId;
+
+    if (
+      cartItemsRaw.some(
+        (item) => item.restaurantId !== restaurantId
+      )
+    ) {
+      return res.status(409).json({
+        success: false,
+        message: "Cart contains items from multiple stores",
+        code: "DIFFERENT_RESTAURANT",
+      });
+    }
+
+    const restaurant = await prisma.restaurant.findUnique({
+      where: { id: restaurantId },
+      include: {
+        timings: true,
+        operatingExceptions: true,
+      },
+    });
+
+    if (!restaurant || restaurant.deletedAt) {
+      return res.status(404).json({
+        success: false,
+        message: "Restaurant is not available",
+      });
+    }
+
+    if (
+      restaurant.verificationStatus &&
+      restaurant.verificationStatus !== "APPROVED"
+    ) {
+      return res.status(409).json({
+        success: false,
+        message: "Restaurant is not available for ordering",
+      });
+    }
+
     const availability = isRestaurantAvailableNow(restaurant);
 
     if (!availability.allowed) {
-      return res.status(400).json({
+      return res.status(409).json({
         success: false,
         message: availability.message,
       });
     }
 
-    const unavailableItem = cartItemsRaw.find(
-      (item) => !item.menuItem || item.menuItem.isAvailable === false
-    );
+    const cartItems = [];
 
-    if (unavailableItem) {
-      return res.status(400).json({
-        success: false,
-        message: `${
-          unavailableItem.menuItem?.name || "Item"
-        } is currently unavailable`,
+    for (const item of cartItemsRaw) {
+      if (!item.menuItem || item.menuItem.isAvailable === false) {
+        return res.status(409).json({
+          success: false,
+          message: `${item.menuItem?.name || "Item"} is currently unavailable`,
+          code: "MENU_ITEM_UNAVAILABLE",
+        });
+      }
+
+      const quantity = Math.max(1, Number(item.quantity || 1));
+
+      if (quantity > MAX_ORDER_ITEM_QUANTITY) {
+        return res.status(400).json({
+          success: false,
+          message: `${item.menuItem.name} quantity exceeds allowed limit`,
+        });
+      }
+
+      const customizationIds = Array.isArray(item.customizationJson)
+        ? item.customizationJson.map((x) => x?.id).filter(Boolean)
+        : [];
+
+      const addonIds = Array.isArray(item.addonJson)
+        ? item.addonJson.map((x) => x?.id).filter(Boolean)
+        : [];
+
+      const activeCustomizations = customizationIds.length
+        ? await prisma.menuItemCustomization.findMany({
+            where: {
+              id: { in: customizationIds },
+              menuItemId: item.menuItemId,
+              isActive: true,
+            },
+          })
+        : [];
+
+      const activeAddons = addonIds.length
+        ? await prisma.menuItemAddon.findMany({
+            where: {
+              id: { in: addonIds },
+              menuItemId: item.menuItemId,
+              isActive: true,
+            },
+          })
+        : [];
+
+      if (activeCustomizations.length !== customizationIds.length) {
+        return res.status(409).json({
+          success: false,
+          message: `${item.menuItem.name} has an unavailable customization`,
+          code: "INVALID_CUSTOMIZATION",
+        });
+      }
+
+      if (activeAddons.length !== addonIds.length) {
+        return res.status(409).json({
+          success: false,
+          message: `${item.menuItem.name} has an unavailable addon`,
+          code: "INVALID_ADDON",
+        });
+      }
+
+      const basePrice = toNumber(item.menuItem.price);
+      const customizationTotal = activeCustomizations.reduce(
+        (sum, row) => sum + toNumber(row.price),
+        0
+      );
+      const addonTotal = activeAddons.reduce(
+        (sum, row) => sum + toNumber(row.price),
+        0
+      );
+
+      const unitPrice = round2(
+        basePrice + customizationTotal + addonTotal
+      );
+
+      cartItems.push({
+        ...item,
+        quantity,
+        price: unitPrice,
+        totalPrice: round2(unitPrice * quantity),
+        customizationJson: activeCustomizations.map((row) => ({
+          id: row.id,
+          title: row.title,
+          price: round2(row.price),
+        })),
+        addonJson: activeAddons.map((row) => ({
+          id: row.id,
+          title: row.title,
+          price: round2(row.price),
+          imageUrl: row.imageUrl || null,
+        })),
       });
     }
 
-    const cartItems = cartItemsRaw.map((item) => {
-      const freshPricing = calculateFreshCartItemPricing(item);
-
-      return {
-        ...item,
-        quantity: freshPricing.quantity,
-        price: freshPricing.unitPrice,
-        totalPrice: freshPricing.totalPrice,
-      };
-    });
-
     const itemTotal = round2(
-      cartItems.reduce((sum, item) => sum + toNumber(item.totalPrice), 0)
+      cartItems.reduce(
+        (sum, item) => sum + toNumber(item.totalPrice),
+        0
+      )
     );
 
-    const distanceKmForCoupon = calculateDistanceKm(
-      restaurant?.latitude,
-      restaurant?.longitude,
-      address?.latitude,
-      address?.longitude
-    );
+    const minimumOrder = round2(restaurant.minimumOrder || 0);
 
-    const deliveryFeeForCoupon = round2(
-      calculateDeliveryFee(itemTotal, distanceKmForCoupon)
-    );
+    if (itemTotal < minimumOrder) {
+      return res.status(400).json({
+        success: false,
+        message: `Minimum order value is ₹${minimumOrder}`,
+        minimumOrder,
+        shortfall: round2(minimumOrder - itemTotal),
+      });
+    }
 
-    let discount = 0;
     let couponId = null;
+    let discount = 0;
+    let freeDelivery = false;
 
     if (couponCode) {
       const coupon = await prisma.coupon.findUnique({
-        where: { code: normalizeCouponCode(couponCode) },
+        where: {
+          code: normalizeCouponCode(couponCode),
+        },
       });
 
       if (!coupon || !coupon.isActive) {
@@ -556,21 +884,31 @@ export const createOrder = async (req, res) => {
         });
       }
 
-      if (coupon.usageLimit && coupon.usedCount >= coupon.usageLimit) {
+      if (
+        coupon.usageLimit !== null &&
+        coupon.usageLimit !== undefined &&
+        coupon.usedCount >= coupon.usageLimit
+      ) {
         return res.status(400).json({
           success: false,
           message: "Coupon usage limit reached",
         });
       }
 
-      if (coupon.scope === "RESTAURANT" && coupon.restaurantId !== restaurantId) {
+      if (
+        coupon.scope === "RESTAURANT" &&
+        coupon.restaurantId !== restaurantId
+      ) {
         return res.status(400).json({
           success: false,
           message: "Coupon not valid for this restaurant",
         });
       }
 
-      if (coupon.scope === "CITY" && coupon.cityId !== restaurant.cityId) {
+      if (
+        coupon.scope === "CITY" &&
+        coupon.cityId !== restaurant.cityId
+      ) {
         return res.status(400).json({
           success: false,
           message: "Coupon not valid in your city",
@@ -579,7 +917,10 @@ export const createOrder = async (req, res) => {
 
       if (coupon.scope === "FIRST_ORDER") {
         const orderCount = await prisma.order.count({
-          where: { userId: req.user.id },
+          where: {
+            userId: req.user.id,
+            status: { not: "CANCELLED" },
+          },
         });
 
         if (orderCount > 0) {
@@ -590,33 +931,57 @@ export const createOrder = async (req, res) => {
         }
       }
 
-      if (coupon.minOrder && itemTotal < toNumber(coupon.minOrder)) {
+      if (
+        coupon.minOrder !== null &&
+        coupon.minOrder !== undefined &&
+        itemTotal < toNumber(coupon.minOrder)
+      ) {
         return res.status(400).json({
           success: false,
           message: `Minimum order should be ₹${coupon.minOrder}`,
         });
       }
 
-      const userUsage = await prisma.couponRedemption.count({
-        where: {
-          couponId: coupon.id,
-          userId: req.user.id,
-        },
-      });
-
-      if (coupon.perUserUsageLimit && userUsage >= coupon.perUserUsageLimit) {
-        return res.status(400).json({
-          success: false,
-          message: "You already used this coupon",
+      if (
+        coupon.perUserUsageLimit !== null &&
+        coupon.perUserUsageLimit !== undefined
+      ) {
+        const userUsage = await prisma.couponRedemption.count({
+          where: {
+            couponId: coupon.id,
+            userId: req.user.id,
+          },
         });
+
+        if (userUsage >= coupon.perUserUsageLimit) {
+          return res.status(400).json({
+            success: false,
+            message: "You already used this coupon",
+          });
+        }
       }
 
-      discount = calculateCouponDiscount({
-        coupon,
-        itemTotal,
-        deliveryFee: deliveryFeeForCoupon,
-      });
+      if (coupon.type === "PERCENT") {
+        discount = (itemTotal * toNumber(coupon.value)) / 100;
 
+        if (
+          coupon.maxDiscount !== null &&
+          coupon.maxDiscount !== undefined
+        ) {
+          discount = Math.min(
+            discount,
+            toNumber(coupon.maxDiscount)
+          );
+        }
+
+        discount = Math.min(discount, itemTotal);
+      } else if (coupon.type === "FLAT") {
+        discount = Math.min(toNumber(coupon.value), itemTotal);
+      } else if (coupon.type === "FREE_DELIVERY") {
+        freeDelivery = true;
+      }
+
+      discount = round2(Math.max(0, discount));
       couponId = coupon.id;
     }
 
@@ -625,16 +990,23 @@ export const createOrder = async (req, res) => {
       restaurant,
       address,
       discount,
+      freeDelivery,
     });
+
+    const snapshot = buildCommissionSnapshot(
+      restaurant,
+      pricing.itemTotal,
+      pricing.discount
+    );
 
     const defaultPrepTime =
       Number(restaurant.defaultPrepTime) ||
       Math.max(
-        ...cartItems.map((item) => Number(item.menuItem?.prepTimeMin || 20)),
+        ...cartItems.map(
+          (item) => Number(item.menuItem?.prepTimeMin || 20)
+        ),
         20
       );
-
-    const paymentStatus = paymentMethod === "COD" ? "PENDING" : "PENDING";
 
     const order = await prisma.$transaction(async (tx) => {
       const orderNumber = await generateUniqueOrderNumber(tx);
@@ -645,28 +1017,37 @@ export const createOrder = async (req, res) => {
           restaurantId,
           vendorId: restaurant.vendorId,
           addressId,
+
           itemTotal: pricing.itemTotal,
           deliveryFee: pricing.deliveryFee,
           distanceKm: pricing.distanceKm,
           discount: pricing.discount,
           couponId,
+
           taxAmount: pricing.taxAmount,
           totalAmount: pricing.totalAmount,
           platformFee: pricing.platformFee,
+
           cgstRate: pricing.cgstRate,
           sgstRate: pricing.sgstRate,
           cgstAmount: pricing.cgstAmount,
           sgstAmount: pricing.sgstAmount,
-          paymentMethod,
-          paymentStatus,
+
+          commissionableAmount: snapshot.commissionableAmount,
+          commissionRate: snapshot.commissionRate,
+          platformCommissionAmount:
+            snapshot.platformCommissionAmount,
+          vendorSettlementAmount:
+            snapshot.vendorSettlementAmount,
+
+          paymentMethod: normalizedPaymentMethod,
+          paymentStatus: "PENDING",
+
           status: "PLACED",
           orderNumber,
           customerNote: customerNote || null,
           estimatedPreparationMinutes: defaultPrepTime,
 
-          // Delivery OTP is generated when order is created.
-          // It should be shown only to customer/user app.
-          // Rider will enter this OTP at delivery time to complete order.
           deliveryOtp: generateDeliveryOtp(),
           deliveryOtpVerified: false,
           deliveryOtpExpiresAt: deliveryOtpExpiry(),
@@ -683,12 +1064,15 @@ export const createOrder = async (req, res) => {
               addonJson: item.addonJson || null,
             })),
           },
+
           history: {
             create: {
               status: "PLACED",
               changedBy: req.user.id,
               note: couponCode
-                ? `Order placed with coupon ${normalizeCouponCode(couponCode)}`
+                ? `Order placed with coupon ${normalizeCouponCode(
+                    couponCode
+                  )}`
                 : "Order placed by customer",
             },
           },
@@ -708,12 +1092,16 @@ export const createOrder = async (req, res) => {
 
         await tx.coupon.update({
           where: { id: couponId },
-          data: { usedCount: { increment: 1 } },
+          data: {
+            usedCount: { increment: 1 },
+          },
         });
       }
 
       await tx.cartItem.deleteMany({
-        where: { userId: req.user.id },
+        where: {
+          userId: req.user.id,
+        },
       });
 
       return newOrder;
@@ -730,7 +1118,10 @@ export const createOrder = async (req, res) => {
       order: safeOrderForVendor,
       restaurantId: order.restaurantId,
       vendorId: order.vendorId,
-      cityId: order.restaurant?.cityId || order.address?.cityId || null,
+      cityId:
+        order.restaurant?.cityId ||
+        order.address?.cityId ||
+        null,
     });
 
     emitOrderStatus(order.id, order.status, {
@@ -738,7 +1129,8 @@ export const createOrder = async (req, res) => {
       message: "Order placed successfully",
     });
 
-    const customerMsg = notificationTemplates.ORDER_PLACED_CUSTOMER();
+    const customerMsg =
+      notificationTemplates.ORDER_PLACED_CUSTOMER();
 
     await safeNotify({
       userId: order.userId,
@@ -753,9 +1145,10 @@ export const createOrder = async (req, res) => {
     });
 
     if (order.vendorId) {
-      const vendorMsg = notificationTemplates.ORDER_PLACED_VENDOR(
-        order.restaurant?.name || "your store"
-      );
+      const vendorMsg =
+        notificationTemplates.ORDER_PLACED_VENDOR(
+          order.restaurant?.name || "your store"
+        );
 
       await safeNotify({
         userId: order.vendorId,
@@ -777,6 +1170,8 @@ export const createOrder = async (req, res) => {
       data: order,
       order,
       pricing: pricing.pricingResponse,
+      paymentRequired:
+        normalizedPaymentMethod !== "COD",
     });
   } catch (error) {
     console.error("Create Order Error:", error);
@@ -784,7 +1179,7 @@ export const createOrder = async (req, res) => {
     if (error.code === "P2002") {
       return res.status(409).json({
         success: false,
-        message: "Order number conflict, please try again",
+        message: "Order conflict, please try again",
       });
     }
 
@@ -963,31 +1358,7 @@ export const updateOrderStatus = async (req, res) => {
     const { id } = req.params;
     const { status, note } = req.body;
 
-    const allowedStatuses = [
-      "ACCEPTED_BY_VENDOR",
-      "PREPARING",
-      "READY_FOR_PICKUP",
-      "ASSIGNED_TO_RIDER",
-      "PICKED_UP",
-      "OUT_FOR_DELIVERY",
-      "DELIVERED",
-      "CANCELLED",
-    ];
-
-    const vendorAllowedStatuses = [
-      "ACCEPTED_BY_VENDOR",
-      "PREPARING",
-      "READY_FOR_PICKUP",
-      "CANCELLED",
-    ];
-
-    const riderAllowedStatuses = [
-      "PICKED_UP",
-      "OUT_FOR_DELIVERY",
-      "DELIVERED",
-    ];
-
-    const adminAllowedStatuses = allowedStatuses;
+    const allowedStatuses = Object.keys(allowedTransitions);
 
     if (!allowedStatuses.includes(status)) {
       return res.status(400).json({
@@ -1002,6 +1373,9 @@ export const updateOrderStatus = async (req, res) => {
         restaurant: true,
         user: true,
         rider: true,
+        paymentTransactions: {
+          orderBy: { createdAt: "desc" },
+        },
       },
     });
 
@@ -1013,10 +1387,42 @@ export const updateOrderStatus = async (req, res) => {
     }
 
     if (["DELIVERED", "CANCELLED"].includes(order.status)) {
-      return res.status(400).json({
+      return res.status(409).json({
         success: false,
         message: `Order is already ${order.status.toLowerCase()}`,
       });
+    }
+
+    const nextStatuses = allowedTransitions[order.status] || [];
+
+    if (!nextStatuses.includes(status)) {
+      return res.status(409).json({
+        success: false,
+        message: `Order cannot move from ${order.status} to ${status}`,
+      });
+    }
+
+    if (req.user.role === "CUSTOMER") {
+      if (order.userId !== req.user.id) {
+        return res.status(403).json({
+          success: false,
+          message: "You cannot update this order",
+        });
+      }
+
+      if (status !== "CANCELLED") {
+        return res.status(403).json({
+          success: false,
+          message: "Customer can only cancel an eligible order",
+        });
+      }
+
+      if (!["PLACED", "ACCEPTED_BY_VENDOR"].includes(order.status)) {
+        return res.status(409).json({
+          success: false,
+          message: "This order can no longer be cancelled",
+        });
+      }
     }
 
     if (req.user.role === "VENDOR") {
@@ -1027,7 +1433,14 @@ export const updateOrderStatus = async (req, res) => {
         });
       }
 
-      if (!vendorAllowedStatuses.includes(status)) {
+      if (
+        ![
+          "ACCEPTED_BY_VENDOR",
+          "PREPARING",
+          "READY_FOR_PICKUP",
+          "CANCELLED",
+        ].includes(status)
+      ) {
         return res.status(403).json({
           success: false,
           message: "Vendor cannot set this status",
@@ -1043,19 +1456,11 @@ export const updateOrderStatus = async (req, res) => {
         });
       }
 
-      if (!riderAllowedStatuses.includes(status)) {
+      if (!["PICKED_UP", "OUT_FOR_DELIVERY"].includes(status)) {
         return res.status(403).json({
           success: false,
-          message: "Rider cannot set this status",
-        });
-      }
-    }
-
-    if (req.user.role === "ADMIN") {
-      if (!adminAllowedStatuses.includes(status)) {
-        return res.status(403).json({
-          success: false,
-          message: "Admin cannot set this status",
+          message:
+            "Rider delivery completion must use the OTP-protected rider flow",
         });
       }
     }
@@ -1076,7 +1481,34 @@ export const updateOrderStatus = async (req, res) => {
       updateData[timeFieldMap[status]] = new Date();
     }
 
+    if (status === "CANCELLED") {
+      updateData.cancelReason =
+        note ||
+        (req.user.role === "CUSTOMER"
+          ? "Cancelled by customer"
+          : "Order cancelled");
+      updateData.cancelledBy = req.user.id;
+    }
+
+    if (
+      status === "DELIVERED" &&
+      isPrepaidMethod(order.paymentMethod) &&
+      order.paymentStatus !== "PAID"
+    ) {
+      return res.status(409).json({
+        success: false,
+        message: "Payment is not confirmed for this order",
+      });
+    }
+
     const updatedOrder = await prisma.$transaction(async (tx) => {
+      let finalPaymentStatus = order.paymentStatus;
+
+      if (status === "DELIVERED" && order.paymentMethod === "COD") {
+        finalPaymentStatus = "PAID";
+        updateData.paymentStatus = "PAID";
+      }
+
       const updated = await tx.order.update({
         where: { id },
         data: updateData,
@@ -1092,46 +1524,16 @@ export const updateOrderStatus = async (req, res) => {
         },
       });
 
+      if (status === "CANCELLED") {
+        await createRefundIfRequired(tx, order, updateData.cancelReason);
+      }
+
       if (status === "DELIVERED") {
-        const existingVendorSettlement = await tx.vendorSettlement.findFirst({
-          where: { orderId: order.id },
+        await ensureDeliveredSettlements(tx, {
+          ...updated,
+          paymentStatus: finalPaymentStatus,
+          restaurant: order.restaurant,
         });
-
-        if (!existingVendorSettlement && order.vendorId) {
-          const grossAmount = toNumber(order.totalAmount);
-          const commissionPercent = toNumber(order.restaurant?.commission || 10);
-          const commissionAmount = round2(
-            (grossAmount * commissionPercent) / 100
-          );
-          const netAmount = round2(grossAmount - commissionAmount);
-
-          await tx.vendorSettlement.create({
-            data: {
-              vendorId: order.vendorId,
-              restaurantId: order.restaurantId,
-              orderId: order.id,
-              grossAmount,
-              commissionAmount,
-              netAmount,
-              status: "PENDING",
-            },
-          });
-        }
-
-        const existingRiderSettlement = await tx.riderSettlement.findFirst({
-          where: { orderId: order.id },
-        });
-
-        if (!existingRiderSettlement && order.riderId) {
-          await tx.riderSettlement.create({
-            data: {
-              riderId: order.riderId,
-              orderId: order.id,
-              amount: toNumber(order.deliveryFee || 30),
-              status: "PENDING",
-            },
-          });
-        }
       }
 
       return updated;
@@ -1142,33 +1544,40 @@ export const updateOrderStatus = async (req, res) => {
     let riderMsg = null;
 
     if (status === "ACCEPTED_BY_VENDOR") {
-      customerMsg = notificationTemplates.ORDER_ACCEPTED_CUSTOMER(
-        order.restaurant?.name || "Store"
-      );
+      customerMsg =
+        notificationTemplates.ORDER_ACCEPTED_CUSTOMER(
+          order.restaurant?.name || "Store"
+        );
     }
 
     if (status === "PREPARING") {
-      customerMsg = notificationTemplates.ORDER_PREPARING_CUSTOMER();
+      customerMsg =
+        notificationTemplates.ORDER_PREPARING_CUSTOMER();
     }
 
     if (status === "READY_FOR_PICKUP") {
-      vendorMsg = notificationTemplates.ORDER_READY_VENDOR();
+      vendorMsg =
+        notificationTemplates.ORDER_READY_VENDOR();
     }
 
     if (status === "ASSIGNED_TO_RIDER") {
-      riderMsg = notificationTemplates.ORDER_ASSIGNED_RIDER();
+      riderMsg =
+        notificationTemplates.ORDER_ASSIGNED_RIDER();
     }
 
     if (status === "OUT_FOR_DELIVERY") {
-      customerMsg = notificationTemplates.ORDER_OUT_FOR_DELIVERY_CUSTOMER();
+      customerMsg =
+        notificationTemplates.ORDER_OUT_FOR_DELIVERY_CUSTOMER();
     }
 
     if (status === "DELIVERED") {
-      customerMsg = notificationTemplates.ORDER_DELIVERED_CUSTOMER();
+      customerMsg =
+        notificationTemplates.ORDER_DELIVERED_CUSTOMER();
     }
 
     if (status === "CANCELLED") {
-      customerMsg = notificationTemplates.ORDER_CANCELLED_CUSTOMER();
+      customerMsg =
+        notificationTemplates.ORDER_CANCELLED_CUSTOMER();
     }
 
     if (customerMsg) {
@@ -1213,13 +1622,14 @@ export const updateOrderStatus = async (req, res) => {
       });
     }
 
-    const safeOrderForNonCustomer = hideDeliveryOtp(updatedOrder);
+    const safeOrderForNonCustomer =
+      hideDeliveryOtp(updatedOrder);
 
     emitOrderStatus(id, status, {
       order:
-        status === "DELIVERED" || status === "CANCELLED"
-          ? safeOrderForNonCustomer
-          : updatedOrder,
+        req.user.id === updatedOrder.userId
+          ? updatedOrder
+          : safeOrderForNonCustomer,
     });
 
     if (updatedOrder.vendorId) {
@@ -1237,16 +1647,94 @@ export const updateOrderStatus = async (req, res) => {
 
     return res.json({
       success: true,
-      message: "Order status updated",
-      order: updatedOrder,
-      data: updatedOrder,
+      message:
+        status === "CANCELLED" &&
+        isPrepaidMethod(order.paymentMethod) &&
+        order.paymentStatus === "PAID"
+          ? "Order cancelled. Refund has been requested."
+          : "Order status updated",
+      order:
+        req.user.id === updatedOrder.userId
+          ? updatedOrder
+          : safeOrderForNonCustomer,
+      data:
+        req.user.id === updatedOrder.userId
+          ? updatedOrder
+          : safeOrderForNonCustomer,
     });
   } catch (error) {
     console.error("Update Order Status Error:", error);
+
     return res.status(500).json({
       success: false,
       message: "Something went wrong",
       error: error.message,
+    });
+  }
+};
+
+export const cancelMyOrder = async (req, res) => {
+  req.body = {
+    ...req.body,
+    status: "CANCELLED",
+    note:
+      req.body?.reason ||
+      req.body?.note ||
+      "Cancelled by customer",
+  };
+
+  return updateOrderStatus(req, res);
+};
+
+export const getMyOrderPaymentStatus = async (req, res) => {
+  try {
+    const order = await prisma.order.findFirst({
+      where: {
+        id: req.params.id,
+        userId: req.user.id,
+      },
+      select: {
+        id: true,
+        orderNumber: true,
+        status: true,
+        paymentMethod: true,
+        paymentStatus: true,
+        totalAmount: true,
+        refundAmount: true,
+        refunds: {
+          orderBy: { createdAt: "desc" },
+        },
+        paymentTransactions: {
+          orderBy: { createdAt: "desc" },
+        },
+      },
+    });
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: "Order not found",
+      });
+    }
+
+    return res.json({
+      success: true,
+      payment: {
+        ...order,
+        totalAmount: round2(order.totalAmount),
+        refundAmount: round2(order.refundAmount),
+        refunds: (order.refunds || []).map((refund) => ({
+          ...refund,
+          amount: round2(refund.amount),
+        })),
+      },
+    });
+  } catch (error) {
+    console.error("Order Payment Status Error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch payment status",
     });
   }
 };

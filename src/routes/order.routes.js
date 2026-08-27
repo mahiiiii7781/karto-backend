@@ -1,6 +1,5 @@
 import express from "express";
 import { protect, allowRoles } from "../middleware/auth.middleware.js";
-
 import {
   createOrder,
   myOrders,
@@ -8,51 +7,27 @@ import {
   vendorOrders,
   riderOrders,
   updateOrderStatus,
+  cancelMyOrder,
+  getMyOrderPaymentStatus,
 } from "../controllers/order.controllers.js";
 
 const router = express.Router();
+router.use(protect);
 
-/* =========================
-   USER ORDER FLOW
-========================= */
+router.post("/", allowRoles("CUSTOMER"), createOrder);
+router.get("/my", allowRoles("CUSTOMER"), myOrders);
+router.get("/vendor", allowRoles("VENDOR", "ADMIN"), vendorOrders);
+router.get("/rider", allowRoles("RIDER", "ADMIN"), riderOrders);
 
-// Create order from user cart / checkout
-router.post("/", protect, createOrder);
+router.patch("/:id/cancel", allowRoles("CUSTOMER"), cancelMyOrder);
+router.get("/:id/payment-status", allowRoles("CUSTOMER"), getMyOrderPaymentStatus);
 
-// Logged-in user orders
-router.get("/my", protect, myOrders);
-
-/* =========================
-   VENDOR ORDER FLOW
-========================= */
-
-// Vendor/Admin restaurant orders
-router.get("/vendor", protect, allowRoles("VENDOR", "ADMIN"), vendorOrders);
-
-/* =========================
-   RIDER ORDER FLOW
-========================= */
-
-// Rider/Admin assigned orders
-router.get("/rider", protect, allowRoles("RIDER", "ADMIN"), riderOrders);
-
-/* =========================
-   COMMON ORDER DETAILS
-========================= */
-
-// Keep this after /my, /vendor, /rider
-router.get("/:id", protect, getOrderById);
-
-/* =========================
-   STATUS UPDATE FLOW
-========================= */
-
-// Vendor/Rider/Admin status updates
 router.patch(
   "/:id/status",
-  protect,
   allowRoles("VENDOR", "RIDER", "ADMIN"),
   updateOrderStatus
 );
+
+router.get("/:id", getOrderById);
 
 export default router;

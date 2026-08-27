@@ -32,6 +32,131 @@ const normalizePhone = (phone) => (phone ? String(phone).trim() : null);
 const generateOtp = () =>
   Math.floor(100000 + Math.random() * 900000).toString();
 
+
+const OTP_TTL_MS = 5 * 60 * 1000;
+const OTP_RESEND_COOLDOWN_MS = 45 * 1000;
+const OTP_MAX_VERIFY_ATTEMPTS = 5;
+
+/*
+  Prevents duplicate OTP requests from the same Node process.
+  DB invalidation below remains the source of truth.
+*/
+const otpRequestLocks = new Map();
+
+const otpIdentityKey = ({ email, phone }) =>
+  email ? `email:${email}` : `phone:${phone}`;
+
+const withOtpLock = async (key, task) => {
+  while (otpRequestLocks.has(key)) {
+    await otpRequestLocks.get(key);
+  }
+
+  let release;
+  const lock = new Promise((resolve) => {
+    release = resolve;
+  });
+
+  otpRequestLocks.set(key, lock);
+
+  try {
+    return await task();
+  } finally {
+    otpRequestLocks.delete(key);
+    release?.();
+  }
+};
+
+const getOtpIdentity = ({ email, phone, channel }) => {
+  const normalizedEmail = normalizeEmail(email);
+  const normalizedPhone = normalizePhone(phone);
+  const normalizedChannel = channel
+    ? String(channel).trim().toLowerCase()
+    : null;
+
+  if (
+    normalizedChannel &&
+    !["email", "phone", "sms"].includes(normalizedChannel)
+  ) {
+    return {
+      error: "channel must be email or phone",
+    };
+  }
+
+  if (normalizedChannel === "email") {
+    if (!normalizedEmail) {
+      return { error: "Email is required" };
+    }
+
+    return {
+      email: normalizedEmail,
+      phone: null,
+      channel: "email",
+    };
+  }
+
+  if (normalizedChannel === "phone" || normalizedChannel === "sms") {
+    if (!normalizedPhone) {
+      return { error: "Phone is required" };
+    }
+
+    return {
+      email: null,
+      phone: normalizedPhone,
+      channel: "phone",
+    };
+  }
+
+  /*
+    Backward-compatible behavior:
+    exactly one destination must be supplied.
+    This intentionally blocks sending email + SMS from one request.
+  */
+  if (normalizedEmail && normalizedPhone) {
+    return {
+      error:
+        "Send OTP to only one channel at a time. Pass either email or phone.",
+    };
+  }
+
+  if (normalizedEmail) {
+    return {
+      email: normalizedEmail,
+      phone: null,
+      channel: "email",
+    };
+  }
+
+  if (normalizedPhone) {
+    return {
+      email: null,
+      phone: normalizedPhone,
+      channel: "phone",
+    };
+  }
+
+  return {
+    error: "Email or phone is required",
+  };
+};
+
+const getOtpWhere = ({ email, phone }) => ({
+  ...(email ? { email } : {}),
+  ...(phone ? { phone } : {}),
+});
+
+const maskOtpDestination = ({ email, phone }) => {
+  if (email) {
+    const [name = "", domain = ""] = email.split("@");
+    return `${name.slice(0, 2)}***@${domain}`;
+  }
+
+  if (phone) {
+    return `******${String(phone).slice(-4)}`;
+  }
+
+  return "";
+};
+
 /* =========================================================
    OLD GMAIL SMTP SETUP - COMMENTED, KEPT FOR FALLBACK ONLY
    Railway par Gmail SMTP timeout de raha tha, isliye Resend active hai.
@@ -65,12 +190,6 @@ const mailTransporter = nodemailer.createTransport({
 
 const resend = new Resend(env.RESEND_API_KEY || process.env.RESEND_API_KEY);
 
-console.log("SMTP_USER:", process.env.SMTP_USER);
-console.log("SMTP_HOST:", process.env.SMTP_HOST);
-console.log("SMTP_PORT:", process.env.SMTP_PORT);
-console.log("RESEND_API_KEY EXISTS:", Boolean(process.env.RESEND_API_KEY));
-console.log("EMAIL_FROM:", process.env.EMAIL_FROM);
-console.log("TWO_FACTOR_API_KEY EXISTS:", Boolean(process.env.TWO_FACTOR_API_KEY));
 
 const sendEmailOtp = async (email, code) => {
   try {
@@ -377,190 +496,391 @@ export const logout = async (req, res) => {
 
 export const sendOtp = async (req, res) => {
   try {
-    const { email, phone } = req.body;
+    const identity = getOtpIdentity(req.body || {});
 
-    const normalizedEmail = normalizeEmail(email);
-    const normalizedPhone = normalizePhone(phone);
-
-    if (!normalizedEmail && !normalizedPhone) {
+    if (identity.error) {
       return res.status(400).json({
         success: false,
-        message: "Email or phone is required",
+        message: identity.error,
       });
     }
 
-    await deleteExpiredOtps();
+    const { email, phone, channel } = identity;
+    const lockKey = otpIdentityKey(identity);
 
-    const code = generateOtp();
+    return await withOtpLock(lockKey, async () => {
+      await deleteExpiredOtps();
 
-    // Saving OTP in DB as fallback and for Email verification
-    await prisma.otp.create({
-      data: {
-        email: normalizedEmail || null,
-        phone: normalizedPhone || null,
-        code,
-        expiresAt: new Date(Date.now() + 5 * 60 * 1000),
-      },
-    });
+      const latestOtp = await prisma.otp.findFirst({
+        where: getOtpWhere(identity),
+        orderBy: { createdAt: "desc" },
+      });
 
-    if (normalizedEmail) {
-      await sendEmailOtp(normalizedEmail, code);
-    }
+      if (latestOtp) {
+        const elapsed =
+          Date.now() - new Date(latestOtp.createdAt).getTime();
 
-    // Replace Twilio with 2Factor.in SMS API
-    if (normalizedPhone) {
-      const apiKey = env.TWO_FACTOR_API_KEY || process.env.TWO_FACTOR_API_KEY;
-      if (!apiKey) {
-        console.error("2Factor API Key is missing");
-        return res.status(500).json({
+        if (
+          !latestOtp.verified &&
+          new Date(latestOtp.expiresAt) > new Date() &&
+          elapsed < OTP_RESEND_COOLDOWN_MS
+        ) {
+          const retryAfterSeconds = Math.max(
+            1,
+            Math.ceil(
+              (OTP_RESEND_COOLDOWN_MS - elapsed) / 1000
+            )
+          );
+
+          res.setHeader(
+            "Retry-After",
+            String(retryAfterSeconds)
+          );
+
+          return res.status(429).json({
+            success: false,
+            message: `Please wait ${retryAfterSeconds} seconds before requesting another OTP.`,
+            retryAfterSeconds,
+          });
+        }
+      }
+
+      /*
+        Only one active OTP for this destination.
+        Old records are invalidated before a new code is created.
+      */
+      await prisma.otp.updateMany({
+        where: {
+          ...getOtpWhere(identity),
+          verified: false,
+        },
+        data: {
+          verified: true,
+        },
+      });
+
+      const code = generateOtp();
+
+      const otpRecord = await prisma.otp.create({
+        data: {
+          email: email || null,
+          phone: phone || null,
+          code,
+          expiresAt: new Date(Date.now() + OTP_TTL_MS),
+          verified: false,
+        },
+      });
+
+      try {
+        if (channel === "email") {
+          await sendEmailOtp(email, code);
+        } else {
+          const apiKey =
+            env.TWO_FACTOR_API_KEY ||
+            process.env.TWO_FACTOR_API_KEY;
+
+          if (!apiKey) {
+            throw new Error(
+              "SMS service is not configured properly"
+            );
+          }
+
+          const digits = String(phone).replace(/\D/g, "");
+
+          if (!/^[6-9]\d{9}$/.test(digits.slice(-10))) {
+            return res.status(400).json({
+              success: false,
+              message: "Enter valid 10 digit phone number",
+            });
+          }
+
+          const phoneFor2FA = `91${digits.slice(-10)}`;
+          const url =
+            `https://2factor.in/API/V1/${apiKey}/SMS/` +
+            `${phoneFor2FA}/${code}`;
+
+          const response = await axios.get(url, {
+            timeout: 15000,
+          });
+
+          if (response.data?.Status !== "Success") {
+            throw new Error(
+              response.data?.Details ||
+                "2Factor response failed"
+            );
+          }
+        }
+      } catch (dispatchError) {
+        /*
+          Do not leave an OTP active when delivery itself failed.
+        */
+        await prisma.otp.updateMany({
+          where: {
+            id: otpRecord.id,
+            verified: false,
+          },
+          data: {
+            verified: true,
+          },
+        });
+
+        console.error(
+          "OTP Dispatch Error:",
+          dispatchError?.response?.data ||
+            dispatchError?.message ||
+            dispatchError
+        );
+
+        return res.status(502).json({
           success: false,
-          message: "SMS service is not configured properly",
+          message:
+            channel === "email"
+              ? "Failed to send email OTP"
+              : "Failed to send SMS OTP",
         });
       }
 
-      // Format for 2factor: 91XXXXXXXXXX
-      const phoneFor2FA = `91${normalizedPhone.replace(/\D/g, "").slice(-10)}`;
-      
-      const url = `https://2factor.in/API/V1/${apiKey}/SMS/${phoneFor2FA}/${code}`;
-
-      try {
-        const response = await axios.get(url);
-        if (response.data.Status !== "Success") {
-          throw new Error("2Factor response failed");
-        }
-      } catch (smsError) {
-        console.error("2Factor API Send Error:", smsError?.response?.data || smsError.message);
-        throw new Error("Failed to dispatch SMS via 2Factor");
-      }
-    }
-
-    return res.status(200).json({
-      success: true,
-      message: "OTP sent successfully",
+      return res.status(200).json({
+        success: true,
+        message: "OTP sent successfully",
+        channel,
+        destination: maskOtpDestination(identity),
+        expiresInSeconds: OTP_TTL_MS / 1000,
+        resendAfterSeconds:
+          OTP_RESEND_COOLDOWN_MS / 1000,
+      });
     });
   } catch (error) {
-    console.error("Send OTP Error FULL:", error);
+    console.error("Send OTP Error:", error);
 
     return res.status(500).json({
       success: false,
       message: "Something went wrong while sending OTP",
-      error: error.message,
-      code: error.code || null,
     });
   }
 };
 
 export const verifyOtp = async (req, res) => {
   try {
-    const { email, phone, code, otp, fullName } = req.body;
+    const {
+      code,
+      otp,
+      fullName,
+    } = req.body;
 
-    const normalizedEmail = normalizeEmail(email);
-    const normalizedPhone = normalizePhone(phone);
-    const finalCode = code || otp;
+    const identity = getOtpIdentity(req.body || {});
+    const finalCode = String(code || otp || "").trim();
 
-    if ((!normalizedEmail && !normalizedPhone) || !finalCode) {
+    if (identity.error || !finalCode) {
       return res.status(400).json({
         success: false,
-        message: "Email/phone and OTP are required",
+        message:
+          identity.error ||
+          "Email/phone and OTP are required",
       });
     }
 
-    // 1. Verify Phone OTP via 2Factor VERIFY3 endpoint
-    if (normalizedPhone) {
-      const apiKey = env.TWO_FACTOR_API_KEY || process.env.TWO_FACTOR_API_KEY;
-      const phoneFor2FA = `91${normalizedPhone.replace(/\D/g, "").slice(-10)}`;
-      
-      const verifyUrl = `https://2factor.in/API/V1/${apiKey}/SMS/VERIFY3/${phoneFor2FA}/${finalCode}`;
-
-      try {
-        const response = await axios.get(verifyUrl);
-        if (response.data.Status !== "Success" || response.data.Details !== "OTP Matched") {
-          return res.status(400).json({ success: false, message: "Invalid OTP" });
-        }
-      } catch (verifyError) {
-        return res.status(400).json({ success: false, message: "Invalid or expired OTP" });
-      }
-    }
-
-    // 2. Fallback / Email verification via local Prisma DB
-    const otpRecord = await prisma.otp.findFirst({
-      where: {
-        code: String(finalCode).trim(),
-        verified: false,
-        expiresAt: { gt: new Date() },
-        OR: [
-          normalizedEmail ? { email: normalizedEmail } : undefined,
-          normalizedPhone ? { phone: normalizedPhone } : undefined,
-        ].filter(Boolean),
-      },
-      orderBy: { createdAt: "desc" },
-    });
-
-    if (!otpRecord && normalizedEmail) {
+    if (!/^\d{6}$/.test(finalCode)) {
       return res.status(400).json({
         success: false,
-        message: "Invalid or expired OTP",
+        message: "Enter a valid 6 digit OTP",
       });
     }
 
-    if (otpRecord) {
-      await prisma.otp.update({
-        where: { id: otpRecord.id },
-        data: { verified: true },
-      });
-    }
+    const lockKey = otpIdentityKey(identity);
 
-    // 3. User Resolution
-    let user = await prisma.user.findFirst({
-      where: {
-        OR: [
-          normalizedEmail ? { email: normalizedEmail } : undefined,
-          normalizedPhone ? { phone: normalizedPhone } : undefined,
-        ].filter(Boolean),
-      },
-    });
+    return await withOtpLock(lockKey, async () => {
+      const now = new Date();
 
-    if (!user) {
-      user = await prisma.user.create({
-        data: {
-          fullName:
-            fullName && String(fullName).trim().length >= 2
-              ? String(fullName).trim()
-              : "Karto User",
-          email:
-            normalizedEmail ||
-            `${String(normalizedPhone).replace("+", "")}@phone.karto.local`,
-          phone: normalizedPhone || null,
-          password: "",
-          role: "CUSTOMER",
+      /*
+        Read only the latest active local OTP for this exact channel.
+        This ensures an older OTP cannot become valid after resend.
+      */
+      const otpRecord = await prisma.otp.findFirst({
+        where: {
+          ...getOtpWhere(identity),
+          verified: false,
+          expiresAt: { gt: now },
+        },
+        orderBy: {
+          createdAt: "desc",
         },
       });
-    }
 
-    if (!user.isActive) {
-      return res.status(403).json({
-        success: false,
-        message: "Account is blocked",
+      if (
+        !otpRecord ||
+        String(otpRecord.code).trim() !== finalCode
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid or expired OTP",
+        });
+      }
+
+      /*
+        Phone OTP is additionally verified by 2Factor.
+        Email OTP relies only on the local record.
+        We never execute both verification channels for one request.
+      */
+      if (identity.channel === "phone") {
+        const apiKey =
+          env.TWO_FACTOR_API_KEY ||
+          process.env.TWO_FACTOR_API_KEY;
+
+        if (!apiKey) {
+          return res.status(503).json({
+            success: false,
+            message: "SMS verification service is unavailable",
+          });
+        }
+
+        const phoneFor2FA =
+          `91${String(identity.phone)
+            .replace(/\D/g, "")
+            .slice(-10)}`;
+
+        const verifyUrl =
+          `https://2factor.in/API/V1/${apiKey}/SMS/VERIFY3/` +
+          `${phoneFor2FA}/${finalCode}`;
+
+        try {
+          const response = await axios.get(verifyUrl, {
+            timeout: 15000,
+          });
+
+          const matched =
+            response.data?.Status === "Success" &&
+            response.data?.Details === "OTP Matched";
+
+          if (!matched) {
+            return res.status(400).json({
+              success: false,
+              message: "Invalid OTP",
+            });
+          }
+        } catch (verifyError) {
+          console.error(
+            "2Factor Verify Error:",
+            verifyError?.response?.data ||
+              verifyError?.message
+          );
+
+          return res.status(400).json({
+            success: false,
+            message: "Invalid or expired OTP",
+          });
+        }
+      }
+
+      /*
+        Atomic consume:
+        if a second verify request arrives at the same time,
+        only one request can change verified=false -> true.
+      */
+      const consumed = await prisma.otp.updateMany({
+        where: {
+          id: otpRecord.id,
+          verified: false,
+          expiresAt: { gt: now },
+        },
+        data: {
+          verified: true,
+        },
       });
-    }
 
-    const accessToken = generateAccessToken(user);
-    const newRefreshToken = generateRefreshToken(user);
+      if (consumed.count !== 1) {
+        return res.status(409).json({
+          success: false,
+          message:
+            "OTP was already used. Please request a new OTP.",
+        });
+      }
 
-    const updatedUser = await prisma.user.update({
-      where: { id: user.id },
-      data: { refreshToken: newRefreshToken },
-    });
+      /*
+        Invalidate any older active OTPs for this same destination.
+      */
+      await prisma.otp.updateMany({
+        where: {
+          ...getOtpWhere(identity),
+          id: { not: otpRecord.id },
+          verified: false,
+        },
+        data: {
+          verified: true,
+        },
+      });
 
-    return res.status(200).json({
-      success: true,
-      message: "OTP verified successfully",
-      accessToken,
-      refreshToken: newRefreshToken,
-      user: safeUser(updatedUser),
+      const userWhere = identity.email
+        ? { email: identity.email }
+        : { phone: identity.phone };
+
+      let user = await prisma.user.findFirst({
+        where: userWhere,
+      });
+
+      if (!user) {
+        user = await prisma.user.create({
+          data: {
+            fullName:
+              fullName &&
+              String(fullName).trim().length >= 2
+                ? String(fullName).trim()
+                : "Karto User",
+
+            email:
+              identity.email ||
+              `${String(identity.phone)
+                .replace(/\D/g, "")
+                .slice(-10)}@phone.karto.local`,
+
+            phone:
+              identity.phone || null,
+
+            password: "",
+            role: "CUSTOMER",
+          },
+        });
+      }
+
+      if (!user.isActive) {
+        return res.status(403).json({
+          success: false,
+          message: "Account is blocked",
+        });
+      }
+
+      const accessToken = generateAccessToken(user);
+      const newRefreshToken =
+        generateRefreshToken(user);
+
+      const updatedUser = await prisma.user.update({
+        where: {
+          id: user.id,
+        },
+        data: {
+          refreshToken: newRefreshToken,
+        },
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: "OTP verified successfully",
+        accessToken,
+        refreshToken: newRefreshToken,
+        user: safeUser(updatedUser),
+      });
     });
   } catch (error) {
     console.error("Verify OTP Error:", error);
+
+    if (error?.code === "P2002") {
+      return res.status(409).json({
+        success: false,
+        message:
+          "An account already exists with this email or phone.",
+      });
+    }
+
     return res.status(500).json({
       success: false,
       message: "Something went wrong",
