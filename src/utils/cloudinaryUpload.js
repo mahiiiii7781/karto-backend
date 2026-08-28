@@ -15,25 +15,33 @@ export const uploadToCloudinary = (file, folder = "misc") => {
       fn(value);
     };
 
+    // Manual safety timeout: 3 min 10 sec
     const timer = setTimeout(() => {
       done(
         reject,
-        new Error("Cloudinary upload timed out after 60 seconds")
+        new Error("Cloudinary upload timed out after 190 seconds")
       );
-    }, 60000);
+    }, 190000);
 
     try {
       const uploadStream = cloudinary.uploader.upload_stream(
         {
           folder: `karto/${folder}`,
           resource_type: "image",
-          timeout: 60000,
+
+          // VPS ko enough upload time do
+          timeout: 180000,
         },
         (error, result) => {
           clearTimeout(timer);
 
           if (error) {
-            console.error("Cloudinary upload error:", error);
+            console.error("Cloudinary upload error:", {
+              message: error?.message,
+              http_code: error?.http_code,
+              name: error?.name,
+            });
+
             return done(reject, error);
           }
 
@@ -50,7 +58,9 @@ export const uploadToCloudinary = (file, folder = "misc") => {
 
       uploadStream.on("error", (error) => {
         clearTimeout(timer);
+
         console.error("Cloudinary stream error:", error);
+
         done(reject, error);
       });
 
@@ -58,14 +68,18 @@ export const uploadToCloudinary = (file, folder = "misc") => {
 
       inputStream.on("error", (error) => {
         clearTimeout(timer);
+
         console.error("Image stream error:", error);
+
         done(reject, error);
       });
 
       inputStream.pipe(uploadStream);
     } catch (error) {
       clearTimeout(timer);
+
       console.error("Cloudinary upload exception:", error);
+
       done(reject, error);
     }
   });
