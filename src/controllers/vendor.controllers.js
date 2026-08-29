@@ -52,18 +52,55 @@ const getDateRange = () => {
   return { todayStart, monthStart, last7Days };
 };
 
-const getVendorRestaurantIds = async (vendorId) => {
-  const restaurants = await prisma.restaurant.findMany({
-    where: { vendorId },
-    select: { id: true },
-  });
+const getVendorRestaurantIds = async (userId) => {
+  const [ownedRestaurants, memberships] = await Promise.all([
+    prisma.restaurant.findMany({
+      where: {
+        vendorId: userId,
+        deletedAt: null,
+      },
+      select: { id: true },
+    }),
+    prisma.restaurantMember.findMany({
+      where: {
+        userId,
+        isActive: true,
+        restaurant: {
+          deletedAt: null,
+        },
+      },
+      select: {
+        restaurantId: true,
+      },
+    }),
+  ]);
 
-  return restaurants.map((r) => r.id);
+  return Array.from(
+    new Set([
+      ...ownedRestaurants.map((restaurant) => restaurant.id),
+      ...memberships.map((membership) => membership.restaurantId),
+    ])
+  );
 };
 
-const getPrimaryRestaurant = async (vendorId) => {
+const getPrimaryRestaurant = async (userId, requestedRestaurantId = null) => {
+  const restaurantIds = await getVendorRestaurantIds(userId);
+
+  if (!restaurantIds.length) {
+    return null;
+  }
+
+  const finalRestaurantId =
+    requestedRestaurantId &&
+    restaurantIds.includes(String(requestedRestaurantId))
+      ? String(requestedRestaurantId)
+      : restaurantIds[0];
+
   return prisma.restaurant.findFirst({
-    where: { vendorId },
+    where: {
+      id: finalRestaurantId,
+      deletedAt: null,
+    },
     orderBy: { createdAt: "asc" },
   });
 };
@@ -713,9 +750,14 @@ export const getVendorDashboard = async (req, res) => {
     const vendorId = req.user.id;
     const { todayStart, monthStart } = getDateRange();
 
+    const accessibleRestaurantIds =
+      await getVendorRestaurantIds(vendorId);
+
     const restaurants = await prisma.restaurant.findMany({
       where: {
-        vendorId,
+        id: {
+          in: accessibleRestaurantIds,
+        },
         deletedAt: null,
       },
       include: {
@@ -2325,17 +2367,11 @@ export const deleteVendorCategory = async (req, res) => {
 
 export const getVendorProfile = async (req, res) => {
   try {
-    const restaurant = await getPrimaryRestaurant(req.user.id);
-
-    if (!restaurant) {
-      return res.status(404).json({
-        success: false,
-        message: "Restaurant not found for this vendor",
-      });
-    }
+    const access = await requireVendorAccess(req, res);
+    if (!access) return;
 
     const finalRestaurant = await prisma.restaurant.findUnique({
-      where: { id: restaurant.id },
+      where: { id: access.restaurant.id },
       include: {
         vendor: {
           select: {
@@ -2373,18 +2409,33 @@ export const updateVendorSettings = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const restaurant = id && id !== "me"
-      ? await prisma.restaurant.findFirst({
-          where: { id, vendorId: req.user.id },
-        })
-      : await getPrimaryRestaurant(req.user.id);
+    const requestedRestaurantId =
+      id && id !== "me"
+        ? String(id)
+        : getRequestedRestaurantId(req);
 
-    if (!restaurant) {
+    const access = await resolveVendorAccess(
+      req.user.id,
+      requestedRestaurantId
+    );
+
+    if (!access) {
       return res.status(404).json({
         success: false,
-        message: "Restaurant not found for this vendor",
+        message: requestedRestaurantId
+          ? "Restaurant access not found for this vendor"
+          : "Vendor restaurant access not found",
       });
     }
+
+    if (!["OWNER", "MANAGER"].includes(access.memberRole)) {
+      return res.status(403).json({
+        success: false,
+        message: "Only owner or manager can update restaurant settings",
+      });
+    }
+
+    const restaurant = access.restaurant;
 
     const body = req.body || {};
     const data = {};
@@ -2518,14 +2569,17 @@ export const updateVendorSettings = async (req, res) => {
 
 export const toggleVendorOpenClose = async (req, res) => {
   try {
-    const restaurant = await getPrimaryRestaurant(req.user.id);
+    const access = await requireVendorAccess(req, res);
+    if (!access) return;
 
-    if (!restaurant) {
-      return res.status(404).json({
+    if (!["OWNER", "MANAGER"].includes(access.memberRole)) {
+      return res.status(403).json({
         success: false,
-        message: "Restaurant not found for this vendor",
+        message: "Only owner or manager can change store availability",
       });
     }
+
+    const restaurant = access.restaurant;
 
     const nextOpen =
       req.body.isOpen !== undefined
@@ -2567,25 +2621,73 @@ export const toggleVendorOpenClose = async (req, res) => {
 
 export const setVendorBusyMode = async (req, res) => {
   try {
-    const restaurant = await getPrimaryRestaurant(req.user.id);
+    const access = await requireVendorAccess(req, res);
+    if (!access) return;
 
-    if (!restaurant) {
-      return res.status(404).json({
+    if (!["OWNER", "MANAGER"].includes(access.memberRole)) {
+      return res.status(403).json({
         success: false,
-        message: "Restaurant not found for this vendor",
+        message: "Only owner or manager can change busy mode",
       });
     }
 
-    const minutes = Number(req.body.minutes || 30);
+    const restaurant = access.restaurant;
 
-    if (!minutes || minutes < 5 || minutes > 180) {
+    const rawMinutes =
+      req.body?.minutes === undefined ||
+      req.body?.minutes === null ||
+      req.body?.minutes === ""
+        ? 30
+        : Number(req.body.minutes);
+
+    if (!Number.isFinite(rawMinutes)) {
       return res.status(400).json({
         success: false,
-        message: "Busy time must be between 5 and 180 minutes",
+        message: "Busy time must be a valid number",
       });
     }
 
-    const busyUntil = new Date(Date.now() + minutes * 60 * 1000);
+    if (rawMinutes === 0) {
+      const updated = await prisma.restaurant.update({
+        where: { id: restaurant.id },
+        data: {
+          busyUntil: null,
+          isOpen: true,
+          isAcceptingOrders: true,
+        },
+        include: { timings: true },
+      });
+
+      emitVendorRefreshSafe(req.user.id, {
+        reason: "VENDOR_BUSY_MODE_CLEARED",
+        restaurant: updated,
+        busyUntil: null,
+        busyMinutes: 0,
+      });
+
+      return res.json({
+        success: true,
+        message: "Busy mode cleared",
+        data: {
+          restaurant: updated,
+          busyUntil: null,
+          busyMinutes: 0,
+        },
+        restaurant: updated,
+      });
+    }
+
+    if (rawMinutes < 5 || rawMinutes > 180) {
+      return res.status(400).json({
+        success: false,
+        message: "Busy time must be 0 or between 5 and 180 minutes",
+      });
+    }
+
+    const minutes = Math.round(rawMinutes);
+    const busyUntil = new Date(
+      Date.now() + minutes * 60 * 1000
+    );
 
     const updated = await prisma.restaurant.update({
       where: { id: restaurant.id },
@@ -2612,12 +2714,14 @@ export const setVendorBusyMode = async (req, res) => {
         busyUntil,
         busyMinutes: minutes,
       },
+      restaurant: updated,
     });
   } catch (error) {
     console.error("Vendor Busy Mode Error:", error);
+
     return res.status(500).json({
       success: false,
-      message: "Something went wrong",
+      message: "Failed to update busy mode",
       error: error.message,
     });
   }
