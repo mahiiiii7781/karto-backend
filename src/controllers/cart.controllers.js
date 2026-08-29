@@ -178,18 +178,11 @@ const restaurantAvailability = (
     };
   }
 
-  if (
-    restaurant.verificationStatus &&
-    restaurant.verificationStatus !==
-      "APPROVED"
-  ) {
-    return {
-      available: false,
-      code: "RESTAURANT_NOT_VERIFIED",
-      message:
-        "Restaurant is not available for ordering",
-    };
-  }
+  /*
+    KYC / verificationStatus is intentionally NOT used as an
+    ordering blocker here. Ordering availability is controlled
+    by the vendor's actual operational restaurant flags.
+  */
 
   if (!restaurant.isOpen) {
     return {
@@ -200,7 +193,7 @@ const restaurantAvailability = (
     };
   }
 
-  if (!restaurant.isAcceptingOrders) {
+  if (restaurant.isAcceptingOrders === false) {
     return {
       available: false,
       code: "NOT_ACCEPTING_ORDERS",
@@ -227,6 +220,7 @@ const restaurantAvailability = (
     available: true,
     code: null,
     message: null,
+    busyUntil: null,
   };
 };
 
@@ -1382,12 +1376,17 @@ export const addToCart = async (
   try {
     const {
       menuItemId,
+      vendorId,
+      vendor_id,
       restaurantId,
       quantity = 1,
       note,
       customizationIds = [],
       addonIds = [],
     } = req.body;
+
+    const requestedVendorId =
+      vendorId || vendor_id || null;
 
     if (!menuItemId) {
       return res.status(400).json({
@@ -1453,13 +1452,27 @@ export const addToCart = async (
 
     if (
       restaurantId &&
-      restaurantId !==
-        menuItem.restaurantId
+      String(restaurantId) !==
+        String(menuItem.restaurantId)
     ) {
       return res.status(400).json({
         success: false,
         message:
           "Invalid restaurant for this menu item",
+        code: "RESTAURANT_MISMATCH",
+      });
+    }
+
+    if (
+      requestedVendorId &&
+      String(requestedVendorId) !==
+        String(menuItem.restaurant.vendorId)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Menu item does not belong to this vendor",
+        code: "VENDOR_MISMATCH",
       });
     }
 
@@ -2238,6 +2251,8 @@ export const replaceCartRestaurant = async (
   try {
     const {
       menuItemId,
+      vendorId,
+      vendor_id,
       restaurantId,
       quantity = 1,
       note,
@@ -2267,6 +2282,7 @@ export const replaceCartRestaurant = async (
 
     req.body = {
       menuItemId,
+      vendorId: vendorId || vendor_id || null,
       restaurantId,
       quantity,
       note,
