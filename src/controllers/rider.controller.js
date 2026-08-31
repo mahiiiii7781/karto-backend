@@ -54,9 +54,9 @@ const activeDeliveryStatuses = [
 
 const riderCanWork = (rider) =>
   Boolean(rider?.isActive) &&
-  rider?.kycStatus === "APPROVED" &&
   !rider?.deletedAt &&
-  !rider?.blockedAt;
+  !rider?.blockedAt &&
+  rider?.kycStatus !== "REJECTED";
 
 const uploadFile = async (req, folder) => {
   if (!req.file) return undefined;
@@ -524,8 +524,8 @@ export const updateOnlineStatus = async (req, res) => {
         message:
           !rider.isActive
             ? "Rider account is inactive"
-            : rider.kycStatus !== "APPROVED"
-            ? "KYC approval is required before going online"
+            : rider.kycStatus === "REJECTED"
+            ? rider.kycRejectionReason || "KYC was rejected. Please update your documents."
             : rider.blockedReason || "Rider account cannot go online",
       });
     }
@@ -643,16 +643,6 @@ export const getCurrentAssignment = async (req, res) => {
         hasAssignment: false,
         hasActiveOrder: false,
         message: "Go online to receive orders",
-        order: null,
-      });
-    }
-
-    if (rider.kycStatus !== "APPROVED") {
-      return res.json({
-        success: true,
-        hasAssignment: false,
-        hasActiveOrder: false,
-        message: "KYC approval required",
         order: null,
       });
     }
@@ -825,8 +815,8 @@ export const acceptOrder = async (req, res) => {
         message:
           !rider.isActive
             ? "Rider account is inactive"
-            : rider.kycStatus !== "APPROVED"
-            ? "KYC approval required"
+            : rider.kycStatus === "REJECTED"
+            ? rider.kycRejectionReason || "KYC was rejected. Please update your documents."
             : rider.blockedReason || "Rider cannot accept orders",
       });
     }
