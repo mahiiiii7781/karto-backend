@@ -696,7 +696,7 @@ export const getNewOrders = async (req, res) => {
     });
 
     const profile = await ensureRiderProfile(riderId);
-    const capacity = Math.max(1, profile.maxOrderCapacity || 1);
+    const capacity = Math.max(1, profile.maxOrderCapacity || 3);
 
     if (activeCount >= capacity) {
       return res.json({
@@ -829,7 +829,7 @@ export const acceptOrder = async (req, res) => {
     }
 
     const profile = await ensureRiderProfile(riderId);
-    const capacity = Math.max(1, profile.maxOrderCapacity || 1);
+    const capacity = Math.max(1, profile.maxOrderCapacity || 3);
 
     const activeCount = await prisma.order.count({
       where: { riderId, status: { in: activeDeliveryStatuses } },
