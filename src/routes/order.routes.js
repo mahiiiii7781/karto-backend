@@ -1,5 +1,10 @@
 import express from "express";
-import { protect, allowRoles } from "../middleware/auth.middleware.js";
+
+import {
+  protect,
+  allowRoles,
+} from "../middleware/auth.middleware.js";
+
 import {
   createOrder,
   myOrders,
@@ -12,22 +17,70 @@ import {
 } from "../controllers/order.controllers.js";
 
 const router = express.Router();
+
 router.use(protect);
 
-router.post("/", allowRoles("CUSTOMER"), createOrder);
-router.get("/my", allowRoles("CUSTOMER"), myOrders);
-router.get("/vendor", allowRoles("VENDOR", "ADMIN"), vendorOrders);
-router.get("/rider", allowRoles("RIDER", "ADMIN"), riderOrders);
+// USER APP / CUSTOMER
+router.post(
+  "/",
+  allowRoles("CUSTOMER", "USER"),
+  createOrder
+);
 
-router.patch("/:id/cancel", allowRoles("CUSTOMER"), cancelMyOrder);
-router.get("/:id/payment-status", allowRoles("CUSTOMER"), getMyOrderPaymentStatus);
+router.get(
+  "/my",
+  allowRoles("CUSTOMER", "USER"),
+  myOrders
+);
 
 router.patch(
+  "/:id/cancel",
+  allowRoles("CUSTOMER", "USER"),
+  cancelMyOrder
+);
+
+router.get(
+  "/:id/payment-status",
+  allowRoles("CUSTOMER", "USER"),
+  getMyOrderPaymentStatus
+);
+
+// VENDOR
+router.get(
+  "/vendor",
+  allowRoles("VENDOR", "ADMIN"),
+  vendorOrders
+);
+
+// RIDER
+router.get(
+  "/rider",
+  allowRoles("RIDER", "ADMIN"),
+  riderOrders
+);
+
+// STATUS UPDATE
+router.patch(
   "/:id/status",
-  allowRoles("VENDOR", "RIDER", "ADMIN"),
+  allowRoles(
+    "VENDOR",
+    "RIDER",
+    "ADMIN"
+  ),
   updateOrderStatus
 );
 
-router.get("/:id", getOrderById);
+// ORDER DETAIL
+router.get(
+  "/:id",
+  allowRoles(
+    "CUSTOMER",
+    "USER",
+    "VENDOR",
+    "RIDER",
+    "ADMIN"
+  ),
+  getOrderById
+);
 
 export default router;
