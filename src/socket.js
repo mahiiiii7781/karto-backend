@@ -25,32 +25,74 @@ const emitRoom = (room, event, payload = {}) => {
   });
 };
 
+const getRawSocketToken = (socket) =>
+  socket.handshake.auth?.token ||
+  socket.handshake.query?.token ||
+  socket.handshake.headers?.authorization?.replace(/^Bearer\s+/i, "") ||
+  null;
+
+const normalizeSocketUser = (decoded) => {
+  if (!decoded || typeof decoded !== "object") return null;
+
+  const id =
+    decoded.id ||
+    decoded.userId ||
+    decoded.sub ||
+    null;
+
+  if (!id) return null;
+
+  return {
+    ...decoded,
+    id: String(id),
+    role: decoded.role
+      ? String(decoded.role).trim().toUpperCase()
+      : null,
+    cityId:
+      decoded.cityId ||
+      decoded.city_id ||
+      null,
+  };
+};
+
 const getUserFromToken = (socket) => {
   try {
-    const token =
-      socket.handshake.auth?.token ||
-      socket.handshake.query?.token ||
-      socket.handshake.headers?.authorization?.replace("Bearer ", "");
+    const token = getRawSocketToken(socket);
 
     if (!token) return null;
 
-    return jwt.verify(
+    const decoded = jwt.verify(
       token,
-      process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET
+      process.env.JWT_ACCESS_SECRET ||
+        process.env.JWT_SECRET
     );
-  } catch {
+
+    return normalizeSocketUser(decoded);
+  } catch (error) {
+    console.error(
+      "[Socket] token verification failed:",
+      error?.message || error
+    );
+
     return null;
   }
 };
 
+const sameId = (a, b) =>
+  Boolean(a && b) &&
+  String(a) === String(b);
+
 const canJoinUserRoom = (socket, userId) =>
-  socket.user?.id === userId || socket.user?.role === "ADMIN";
+  sameId(socket.user?.id, userId) ||
+  socket.user?.role === "ADMIN";
 
 const canJoinVendorRoom = (socket, vendorId) =>
-  socket.user?.id === vendorId || socket.user?.role === "ADMIN";
+  sameId(socket.user?.id, vendorId) ||
+  socket.user?.role === "ADMIN";
 
 const canJoinRiderRoom = (socket, riderId) =>
-  socket.user?.id === riderId || socket.user?.role === "ADMIN";
+  sameId(socket.user?.id, riderId) ||
+  socket.user?.role === "ADMIN";
 
 const canJoinAdminRoom = (socket) => socket.user?.role === "ADMIN";
 
@@ -88,45 +130,90 @@ export const initSocket = (server) => {
   setSocketInstance(io);
 
   io.use((socket, next) => {
+    const rawToken = getRawSocketToken(socket);
     const user = getUserFromToken(socket);
+
+    /*
+     * If a client sends a token and it is invalid, do not silently
+     * connect it as a guest. Previously this could make the Vendor
+     * dashboard show "Realtime connected" while the socket was not
+     * actually inside vendor-{vendorId}, so new-order audio never fired.
+     */
+    if (rawToken && !user) {
+      return next(
+        new Error("Socket authentication failed")
+      );
+    }
 
     if (user) {
       socket.user = user;
 
-      safeJoin(socket, `user-${user.id}`);
+      safeJoin(
+        socket,
+        `user-${user.id}`
+      );
 
       if (user.role) {
-        safeJoin(socket, `role-${user.role}`);
+        safeJoin(
+          socket,
+          `role-${user.role}`
+        );
       }
 
       if (user.role === "VENDOR") {
-        safeJoin(socket, `vendor-${user.id}`);
+        safeJoin(
+          socket,
+          `vendor-${user.id}`
+        );
       }
 
       if (user.role === "RIDER") {
-        safeJoin(socket, `rider-${user.id}`);
+        safeJoin(
+          socket,
+          `rider-${user.id}`
+        );
 
         if (user.cityId) {
-          safeJoin(socket, `rider-city-${user.cityId}`);
+          safeJoin(
+            socket,
+            `rider-city-${user.cityId}`
+          );
         }
       }
 
       if (user.role === "ADMIN") {
-        safeJoin(socket, "admin");
+        safeJoin(
+          socket,
+          "admin"
+        );
       }
+
+      console.log(
+        `[Socket] authenticated ${user.role || "USER"} ${user.id}`
+      );
+    } else {
+      console.log(
+        `[Socket] guest connection ${socket.id}`
+      );
     }
 
     next();
   });
 
   io.on("connection", (socket) => {
-    console.log("Socket connected:", socket.id, socket.user?.id || "guest");
+    console.log(
+      "Socket connected:",
+      socket.id,
+      socket.user?.id || "guest",
+      socket.user?.role || ""
+    );
 
     socket.emit("SOCKET_CONNECTED", {
       success: true,
       socketId: socket.id,
       userId: socket.user?.id || null,
       role: socket.user?.role || null,
+      rooms: Array.from(socket.rooms || []),
       connectedAt: now(),
     });
 
@@ -205,6 +292,10 @@ export const initSocket = (server) => {
       joinWithAck(socket, `vendor-${finalVendorId}`, "VENDOR_ROOM_JOINED", {
         vendorId: finalVendorId,
       });
+
+      console.log(
+        `[Socket] ${socket.id} joined vendor-${finalVendorId}`
+      );
     });
 
     socket.on("leaveVendorRoom", (vendorId) => {
@@ -224,6 +315,10 @@ export const initSocket = (server) => {
       joinWithAck(socket, `vendor-${finalVendorId}`, "VENDOR_ROOM_JOINED", {
         vendorId: finalVendorId,
       });
+
+      console.log(
+        `[Socket] ${socket.id} joined vendor-${finalVendorId}`
+      );
     });
 
     socket.on("leave-vendor-room", (vendorId) => {
@@ -244,6 +339,10 @@ export const initSocket = (server) => {
       }
 
       safeJoin(socket, `vendor-${vendorId}`);
+
+      console.log(
+        `[Socket] vendor online ${vendorId}; room vendor-${vendorId}`
+      );
 
       emitRoom("admin", "vendor-online-status-changed", {
         vendorId,

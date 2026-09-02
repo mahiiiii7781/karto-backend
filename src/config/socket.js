@@ -103,7 +103,15 @@ export const emitRiderLocation = (orderId, location, extra = {}) => {
 ========================= */
 
 export const emitNewOrder = (vendorId, order) => {
-  if (!vendorId || !order) return;
+  const finalVendorId =
+    vendorId ||
+    order?.vendorId ||
+    order?.restaurant?.vendorId ||
+    null;
+
+  if (!finalVendorId || !order?.id) return;
+
+  const room = `vendor-${finalVendorId}`;
 
   const payload = {
     id: order.id,
@@ -111,22 +119,64 @@ export const emitNewOrder = (vendorId, order) => {
     orderNumber: order.orderNumber,
     totalAmount: order.totalAmount,
     status: order.status,
-    customer: order.user || order.customer,
-    user: order.user || order.customer,
-    items: order.items,
-    restaurant: order.restaurant,
+    vendorId: finalVendorId,
+    restaurantId:
+      order.restaurantId ||
+      order.restaurant?.id ||
+      null,
+    customer:
+      order.user ||
+      order.customer ||
+      null,
+    user:
+      order.user ||
+      order.customer ||
+      null,
+    items: order.items || [],
+    restaurant: order.restaurant || null,
     order,
-    createdAt: order.createdAt,
+    createdAt:
+      order.createdAt ||
+      now(),
   };
 
-  safeEmit(`vendor-${vendorId}`, "NEW_ORDER", payload);
-  safeEmit(`vendor-${vendorId}`, "vendor:newOrder", payload);
-  safeEmit(`vendor-${vendorId}`, "new-order", payload);
+  /*
+   * Keep all event aliases for compatibility with current/older
+   * Vendor app builds. The VendorDashboard listens to several of
+   * these names, so a new order will always hit the same handler.
+   */
+  const events = [
+    "NEW_ORDER",
+    "vendor:newOrder",
+    "new-order",
+    "new_order",
+    "ORDER_CREATED",
+    "VENDOR_NEW_ORDER",
+  ];
 
-  safeEmit(`vendor-${vendorId}`, "VENDOR_DASHBOARD_REFRESH", {
+  events.forEach((event) => {
+    safeEmit(room, event, payload);
+  });
+
+  safeEmit(room, "VENDOR_DASHBOARD_REFRESH", {
     reason: "NEW_ORDER",
+    orderId: order.id,
+    vendorId: finalVendorId,
+    restaurantId: payload.restaurantId,
     order,
   });
+
+  safeEmit(room, "vendor:dashboardRefresh", {
+    reason: "NEW_ORDER",
+    orderId: order.id,
+    vendorId: finalVendorId,
+    restaurantId: payload.restaurantId,
+    order,
+  });
+
+  console.log(
+    `[Socket] New order ${order.id} emitted to ${room}`
+  );
 
   safeEmit("admin", "NEW_ORDER", payload);
   safeEmit("admin", "new-order-created", payload);
