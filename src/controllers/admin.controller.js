@@ -3545,11 +3545,24 @@ export const createCoupon = async (req, res) => {
       code,
       title,
       description,
+
+      // Current Prisma fields
+      type,
+      scope = "GLOBAL",
+      value,
+      minOrder,
+      maxDiscount,
+      validFrom,
+      validUntil,
+      perUserUsageLimit,
+      restaurantId,
+      cityId,
+
+      // Backward-compatible old/admin frontend fields
       discountType = "PERCENTAGE",
       discountValue,
       minOrderAmount = 0,
       maxDiscountAmount,
-      maxDiscount,
       startDate,
       startsAt,
       endDate,
@@ -3561,37 +3574,159 @@ export const createCoupon = async (req, res) => {
       isActive = true,
     } = req.body;
 
-    if (!code?.trim() || discountValue === undefined) {
+    const finalCode = code?.trim()?.toUpperCase();
+
+    const normalizedDiscountType = String(
+      type ||
+        (String(discountType || "").toUpperCase() === "PERCENTAGE"
+          ? "PERCENT"
+          : String(discountType || "").toUpperCase())
+    ).trim().toUpperCase();
+
+    const finalValue = value ?? discountValue;
+    const finalMinOrder = minOrder ?? minOrderAmount ?? 0;
+    const finalMaxDiscount = maxDiscount ?? maxDiscountAmount;
+    const finalStartDate = validFrom ?? startDate ?? startsAt;
+    const finalEndDate = validUntil ?? endDate ?? expiresAt;
+    const finalPerUserLimit =
+      perUserUsageLimit ?? perUserLimit ?? userUsageLimit ?? 1;
+    const finalScope = String(scope || "GLOBAL").trim().toUpperCase();
+
+    const allowedTypes = ["PERCENT", "FLAT", "FREE_DELIVERY"];
+    const allowedScopes = ["GLOBAL", "RESTAURANT", "CITY", "FIRST_ORDER"];
+
+    if (!finalCode || finalValue === undefined || finalValue === null) {
       return res.status(400).json({
         success: false,
-        message: "Coupon code and discountValue are required",
+        message: "Coupon code and value/discountValue are required",
       });
     }
 
-    const finalMaxDiscount = maxDiscountAmount ?? maxDiscount;
-    const finalStartDate = startDate ?? startsAt;
-    const finalEndDate = endDate ?? expiresAt;
-    const finalPerUserLimit = perUserLimit ?? userUsageLimit ?? 1;
+    if (!allowedTypes.includes(normalizedDiscountType)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid coupon type",
+      });
+    }
+
+    if (!allowedScopes.includes(finalScope)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid coupon scope",
+      });
+    }
+
+    if (finalScope === "RESTAURANT" && !restaurantId) {
+      return res.status(400).json({
+        success: false,
+        message: "restaurantId is required for RESTAURANT scope coupon",
+      });
+    }
+
+    if (finalScope === "CITY" && !cityId) {
+      return res.status(400).json({
+        success: false,
+        message: "cityId is required for CITY scope coupon",
+      });
+    }
+
+    const numericValue = Number(finalValue);
+    const numericMinOrder = Number(finalMinOrder || 0);
+
+    if (!Number.isFinite(numericValue) || numericValue < 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Coupon value must be a valid non-negative number",
+      });
+    }
+
+    if (!Number.isFinite(numericMinOrder) || numericMinOrder < 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Minimum order amount must be a valid non-negative number",
+      });
+    }
+
+    if (normalizedDiscountType === "PERCENT" && numericValue > 100) {
+      return res.status(400).json({
+        success: false,
+        message: "Percentage coupon value cannot be greater than 100",
+      });
+    }
+
+    if (finalStartDate && !safeDate(finalStartDate)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid coupon validFrom/startDate",
+      });
+    }
+
+    if (finalEndDate && !safeDate(finalEndDate)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid coupon validUntil/endDate",
+      });
+    }
+
+    if (
+      finalStartDate &&
+      finalEndDate &&
+      safeDate(finalStartDate) > safeDate(finalEndDate)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Coupon validUntil must be after validFrom",
+      });
+    }
 
     const coupon = await prisma.coupon.create({
       data: {
-        code: code.trim().toUpperCase(),
-        ...(title !== undefined && { title: title?.trim() || code.trim().toUpperCase() }),
-        ...(description !== undefined && { description: description?.trim() || null }),
-        ...(audience !== undefined && { audience }),
-        discountType,
-        discountValue: Number(discountValue),
-        minOrderAmount: Number(minOrderAmount || 0),
-        ...(finalMaxDiscount !== undefined && {
-          maxDiscountAmount: finalMaxDiscount ? Number(finalMaxDiscount) : null,
-        }),
-        ...(finalStartDate && { startDate: new Date(finalStartDate) }),
-        ...(finalEndDate && { endDate: new Date(finalEndDate) }),
-        ...(usageLimit !== undefined && { usageLimit: usageLimit ? Number(usageLimit) : null }),
-        ...(finalPerUserLimit !== undefined && { perUserLimit: Number(finalPerUserLimit || 1) }),
+        code: finalCode,
+        title: title?.trim() || finalCode,
+        description: description?.trim() || null,
+
+        type: normalizedDiscountType,
+        scope: finalScope,
+        value: numericValue,
+
+        maxDiscount:
+          finalMaxDiscount !== undefined &&
+          finalMaxDiscount !== null &&
+          finalMaxDiscount !== ""
+            ? Number(finalMaxDiscount)
+            : null,
+
+        minOrder: numericMinOrder,
+
+        restaurantId:
+          finalScope === "RESTAURANT" ? restaurantId || null : null,
+
+        cityId:
+          finalScope === "CITY" ? cityId || null : null,
+
+        usageLimit:
+          usageLimit !== undefined &&
+          usageLimit !== null &&
+          usageLimit !== ""
+            ? Number(usageLimit)
+            : null,
+
+        perUserUsageLimit:
+          finalPerUserLimit !== undefined &&
+          finalPerUserLimit !== null &&
+          finalPerUserLimit !== ""
+            ? Number(finalPerUserLimit)
+            : 1,
+
+        validFrom: finalStartDate ? new Date(finalStartDate) : null,
+        validUntil: finalEndDate ? new Date(finalEndDate) : null,
+
         isActive: boolValue(isActive, true),
       },
     });
+
+    // `audience` is intentionally still accepted above for backward compatibility.
+    // It is not saved because the current Prisma Coupon model has no `audience` field.
 
     return res.status(201).json({
       success: true,
@@ -3601,6 +3736,21 @@ export const createCoupon = async (req, res) => {
     });
   } catch (error) {
     console.error("Create Coupon Error:", error);
+
+    if (error?.code === "P2002") {
+      return res.status(409).json({
+        success: false,
+        message: "Coupon code already exists",
+      });
+    }
+
+    if (error?.code === "P2003") {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid coupon relation data",
+      });
+    }
+
     return res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -3615,15 +3765,29 @@ export const updateCoupon = async (req, res) => {
     }
 
     const { id } = req.params;
+
     const {
       code,
       title,
       description,
+
+      // Current Prisma fields
+      type,
+      scope,
+      value,
+      minOrder,
+      maxDiscount,
+      validFrom,
+      validUntil,
+      perUserUsageLimit,
+      restaurantId,
+      cityId,
+
+      // Backward-compatible old/admin frontend fields
       discountType,
       discountValue,
       minOrderAmount,
       maxDiscountAmount,
-      maxDiscount,
       startDate,
       startsAt,
       endDate,
@@ -3635,31 +3799,255 @@ export const updateCoupon = async (req, res) => {
       isActive,
     } = req.body;
 
-    const finalMaxDiscount = maxDiscountAmount ?? maxDiscount;
-    const finalStartDate = startDate ?? startsAt;
-    const finalEndDate = endDate ?? expiresAt;
-    const finalPerUserLimit = perUserLimit ?? userUsageLimit;
+    const existingCoupon = await prisma.coupon.findUnique({
+      where: { id },
+    });
+
+    if (!existingCoupon) {
+      return res.status(404).json({
+        success: false,
+        message: "Coupon not found",
+      });
+    }
+
+    const rawType =
+      type ??
+      (discountType !== undefined
+        ? String(discountType).toUpperCase() === "PERCENTAGE"
+          ? "PERCENT"
+          : String(discountType).toUpperCase()
+        : undefined);
+
+    const finalType =
+      rawType !== undefined
+        ? String(rawType).trim().toUpperCase()
+        : existingCoupon.type;
+
+    const finalScope =
+      scope !== undefined
+        ? String(scope).trim().toUpperCase()
+        : existingCoupon.scope;
+
+    const finalValue = value ?? discountValue;
+    const finalMinOrder = minOrder ?? minOrderAmount;
+    const finalMaxDiscount = maxDiscount ?? maxDiscountAmount;
+    const finalStartDate = validFrom ?? startDate ?? startsAt;
+    const finalEndDate = validUntil ?? endDate ?? expiresAt;
+    const finalPerUserLimit =
+      perUserUsageLimit ?? perUserLimit ?? userUsageLimit;
+
+    const allowedTypes = ["PERCENT", "FLAT", "FREE_DELIVERY"];
+    const allowedScopes = ["GLOBAL", "RESTAURANT", "CITY", "FIRST_ORDER"];
+
+    if (!allowedTypes.includes(finalType)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid coupon type",
+      });
+    }
+
+    if (!allowedScopes.includes(finalScope)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid coupon scope",
+      });
+    }
+
+    const finalRestaurantId =
+      restaurantId !== undefined
+        ? restaurantId || null
+        : existingCoupon.restaurantId;
+
+    const finalCityId =
+      cityId !== undefined ? cityId || null : existingCoupon.cityId;
+
+    if (finalScope === "RESTAURANT" && !finalRestaurantId) {
+      return res.status(400).json({
+        success: false,
+        message: "restaurantId is required for RESTAURANT scope coupon",
+      });
+    }
+
+    if (finalScope === "CITY" && !finalCityId) {
+      return res.status(400).json({
+        success: false,
+        message: "cityId is required for CITY scope coupon",
+      });
+    }
+
+    if (
+      finalValue !== undefined &&
+      finalValue !== null &&
+      (!Number.isFinite(Number(finalValue)) || Number(finalValue) < 0)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Coupon value must be a valid non-negative number",
+      });
+    }
+
+    const percentageValue =
+      finalValue !== undefined && finalValue !== null
+        ? Number(finalValue)
+        : Number(existingCoupon.value);
+
+    if (finalType === "PERCENT" && percentageValue > 100) {
+      return res.status(400).json({
+        success: false,
+        message: "Percentage coupon value cannot be greater than 100",
+      });
+    }
+
+    if (
+      finalMinOrder !== undefined &&
+      finalMinOrder !== null &&
+      (!Number.isFinite(Number(finalMinOrder)) || Number(finalMinOrder) < 0)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Minimum order amount must be a valid non-negative number",
+      });
+    }
+
+    if (
+      finalStartDate !== undefined &&
+      finalStartDate !== null &&
+      finalStartDate !== "" &&
+      !safeDate(finalStartDate)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid coupon validFrom/startDate",
+      });
+    }
+
+    if (
+      finalEndDate !== undefined &&
+      finalEndDate !== null &&
+      finalEndDate !== "" &&
+      !safeDate(finalEndDate)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid coupon validUntil/endDate",
+      });
+    }
+
+    const effectiveStartDate =
+      finalStartDate !== undefined
+        ? finalStartDate
+          ? safeDate(finalStartDate)
+          : null
+        : existingCoupon.validFrom;
+
+    const effectiveEndDate =
+      finalEndDate !== undefined
+        ? finalEndDate
+          ? safeDate(finalEndDate)
+          : null
+        : existingCoupon.validUntil;
+
+    if (
+      effectiveStartDate &&
+      effectiveEndDate &&
+      effectiveStartDate > effectiveEndDate
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Coupon validUntil must be after validFrom",
+      });
+    }
 
     const coupon = await prisma.coupon.update({
       where: { id },
       data: {
-        ...(code !== undefined && { code: code.trim().toUpperCase() }),
-        ...(title !== undefined && { title: title?.trim() || null }),
-        ...(description !== undefined && { description: description?.trim() || null }),
-        ...(audience !== undefined && { audience }),
-        ...(discountType !== undefined && { discountType }),
-        ...(discountValue !== undefined && { discountValue: Number(discountValue) }),
-        ...(minOrderAmount !== undefined && { minOrderAmount: Number(minOrderAmount || 0) }),
-        ...(finalMaxDiscount !== undefined && {
-          maxDiscountAmount: finalMaxDiscount ? Number(finalMaxDiscount) : null,
+        ...(code !== undefined && {
+          code: code.trim().toUpperCase(),
         }),
-        ...(finalStartDate !== undefined && { startDate: finalStartDate ? new Date(finalStartDate) : null }),
-        ...(finalEndDate !== undefined && { endDate: finalEndDate ? new Date(finalEndDate) : null }),
-        ...(usageLimit !== undefined && { usageLimit: usageLimit ? Number(usageLimit) : null }),
-        ...(finalPerUserLimit !== undefined && { perUserLimit: Number(finalPerUserLimit || 1) }),
-        ...(isActive !== undefined && { isActive: boolValue(isActive) }),
+
+        ...(title !== undefined && {
+          title: title?.trim() || existingCoupon.title,
+        }),
+
+        ...(description !== undefined && {
+          description: description?.trim() || null,
+        }),
+
+        ...(rawType !== undefined && {
+          type: finalType,
+        }),
+
+        ...(scope !== undefined && {
+          scope: finalScope,
+        }),
+
+        ...(finalValue !== undefined && {
+          value: Number(finalValue),
+        }),
+
+        ...(finalMinOrder !== undefined && {
+          minOrder:
+            finalMinOrder === null || finalMinOrder === ""
+              ? null
+              : Number(finalMinOrder),
+        }),
+
+        ...(finalMaxDiscount !== undefined && {
+          maxDiscount:
+            finalMaxDiscount === null || finalMaxDiscount === ""
+              ? null
+              : Number(finalMaxDiscount),
+        }),
+
+        ...(usageLimit !== undefined && {
+          usageLimit:
+            usageLimit === null || usageLimit === ""
+              ? null
+              : Number(usageLimit),
+        }),
+
+        ...(finalPerUserLimit !== undefined && {
+          perUserUsageLimit:
+            finalPerUserLimit === null || finalPerUserLimit === ""
+              ? null
+              : Number(finalPerUserLimit),
+        }),
+
+        ...(finalStartDate !== undefined && {
+          validFrom: finalStartDate ? new Date(finalStartDate) : null,
+        }),
+
+        ...(finalEndDate !== undefined && {
+          validUntil: finalEndDate ? new Date(finalEndDate) : null,
+        }),
+
+        ...(restaurantId !== undefined && {
+          restaurantId:
+            finalScope === "RESTAURANT" ? restaurantId || null : null,
+        }),
+
+        ...(cityId !== undefined && {
+          cityId: finalScope === "CITY" ? cityId || null : null,
+        }),
+
+        ...(scope !== undefined &&
+          finalScope !== "RESTAURANT" && {
+            restaurantId: null,
+          }),
+
+        ...(scope !== undefined &&
+          finalScope !== "CITY" && {
+            cityId: null,
+          }),
+
+        ...(isActive !== undefined && {
+          isActive: boolValue(isActive),
+        }),
       },
     });
+
+    // `audience` is intentionally still accepted above for backward compatibility.
+    // It is not saved because the current Prisma Coupon model has no `audience` field.
 
     return res.json({
       success: true,
@@ -3669,6 +4057,21 @@ export const updateCoupon = async (req, res) => {
     });
   } catch (error) {
     console.error("Update Coupon Error:", error);
+
+    if (error?.code === "P2002") {
+      return res.status(409).json({
+        success: false,
+        message: "Coupon code already exists",
+      });
+    }
+
+    if (error?.code === "P2003") {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid coupon relation data",
+      });
+    }
+
     return res.status(500).json({ success: false, message: error.message });
   }
 };
