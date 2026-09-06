@@ -310,9 +310,14 @@ const calculateOrderPricing = ({
     address?.longitude
   );
 
-  const deliveryFeeBeforeDiscount = round2(
-    calculateDeliveryFee(itemTotal, distanceKm)
-  );
+  // Free delivery on orders of ₹99 or above.
+  // Keep the existing distance-based delivery fee calculation for lower-value carts.
+  const deliveryFeeBeforeDiscount =
+    itemTotal >= 99
+      ? 0
+      : round2(
+          calculateDeliveryFee(itemTotal, distanceKm)
+        );
 
   const itemDiscount = Math.min(
     round2(Math.max(0, discount)),
