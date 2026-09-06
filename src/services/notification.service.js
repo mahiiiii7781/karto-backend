@@ -179,6 +179,12 @@ export const sendPushToUser = async ({
   body,
   data = {},
   saveToDb = true,
+
+  // Optional push overrides.
+  // Existing callers can ignore these and will keep the default channel/sound.
+  androidChannelId = "karto_default",
+  androidSound = "default",
+  androidVibrate = true,
 }) => {
   const finalUserId =
     cleanText(userId);
@@ -294,11 +300,21 @@ export const sendPushToUser = async ({
         priority: "high",
 
         notification: {
+          // For custom Android sounds pass the raw resource name
+          // without extension, e.g. "new_order".
           sound:
+            cleanText(androidSound) ||
             "default",
 
           channelId:
+            cleanText(androidChannelId) ||
             "karto_default",
+
+          defaultVibrateTimings:
+            androidVibrate !== false,
+
+          visibility:
+            "public",
         },
       },
 
@@ -425,6 +441,9 @@ export const sendPushToUsers = async ({
   body,
   data = {},
   saveToDb = true,
+  androidChannelId = "karto_default",
+  androidSound = "default",
+  androidVibrate = true,
 }) => {
   const ids =
     [
@@ -459,6 +478,9 @@ export const sendPushToUsers = async ({
         body,
         data,
         saveToDb,
+        androidChannelId,
+        androidSound,
+        androidVibrate,
       })
     );
   }

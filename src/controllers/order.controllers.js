@@ -310,14 +310,9 @@ const calculateOrderPricing = ({
     address?.longitude
   );
 
-  // Free delivery on orders of ₹99 or above.
-  // Keep the existing distance-based delivery fee calculation for lower-value carts.
-  const deliveryFeeBeforeDiscount =
-    itemTotal >= 99
-      ? 0
-      : round2(
-          calculateDeliveryFee(itemTotal, distanceKm)
-        );
+  const deliveryFeeBeforeDiscount = round2(
+    calculateDeliveryFee(itemTotal, distanceKm)
+  );
 
   const itemDiscount = Math.min(
     round2(Math.max(0, discount)),
@@ -1166,6 +1161,11 @@ export const createOrder = async (req, res) => {
           restaurantId: order.restaurantId,
           status: order.status,
         },
+
+        // Dedicated high-priority Android new-order notification.
+        androidChannelId: "karto_new_orders",
+        androidSound: "new_order",
+        androidVibrate: true,
       });
     }
 
