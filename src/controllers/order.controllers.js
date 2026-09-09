@@ -1166,6 +1166,9 @@ export const createOrder = async (req, res) => {
           orderNumber: order.orderNumber,
           restaurantId: order.restaurantId,
           status: order.status,
+          event: "NEW_ORDER",
+          notificationKind: "VENDOR_NEW_ORDER",
+          target: "VENDOR",
         },
 
         // Dedicated high-priority Android new-order notification.
