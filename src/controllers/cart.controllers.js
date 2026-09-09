@@ -24,6 +24,10 @@ const PLATFORM_FEE = round2(
   process.env.KARTO_PLATFORM_FEE || 5
 );
 
+const FREE_DELIVERY_MIN_ORDER = round2(
+  process.env.KARTO_FREE_DELIVERY_MIN_ORDER || 99
+);
+
 const CGST_RATE = round2(
   process.env.KARTO_CGST_RATE || 2.5
 );
@@ -265,9 +269,11 @@ export const calculateCartPricingFromItems = (
 
   const deliveryFeeBeforeDiscount =
     cartItems.length
-      ? round2(
-          restaurant?.deliveryFee || 0
-        )
+      ? cartValue >= FREE_DELIVERY_MIN_ORDER
+        ? 0
+        : round2(
+            restaurant?.deliveryFee || 0
+          )
       : 0;
 
   const platformFee =

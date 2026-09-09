@@ -65,6 +65,9 @@ const round2 = (value) =>
   Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
 
 const PLATFORM_FEE = round2(process.env.KARTO_PLATFORM_FEE || 5);
+const FREE_DELIVERY_MIN_ORDER = round2(
+  process.env.KARTO_FREE_DELIVERY_MIN_ORDER || 99
+);
 const CGST_RATE = round2(process.env.KARTO_CGST_RATE || 2.5);
 const SGST_RATE = round2(process.env.KARTO_SGST_RATE || 2.5);
 
@@ -310,9 +313,12 @@ const calculateOrderPricing = ({
     address?.longitude
   );
 
-  const deliveryFeeBeforeDiscount = round2(
-    calculateDeliveryFee(itemTotal, distanceKm)
-  );
+  const deliveryFeeBeforeDiscount =
+    itemTotal >= FREE_DELIVERY_MIN_ORDER
+      ? 0
+      : round2(
+          calculateDeliveryFee(itemTotal, distanceKm)
+        );
 
   const itemDiscount = Math.min(
     round2(Math.max(0, discount)),
