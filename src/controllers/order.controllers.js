@@ -618,7 +618,13 @@ const notifyAvailableRiders = async (order) => {
             orderId: fullOrder.id,
             orderNumber: fullOrder.orderNumber,
             status: fullOrder.status,
+            event: "NEW_RIDER_ORDER",
+            notificationKind: "RIDER_NEW_ORDER",
+            target: "RIDER",
           },
+          androidChannelId: "karto_new_orders",
+          androidSound: "new_order",
+          androidVibrate: true,
         })
       )
     );
